@@ -9,7 +9,7 @@ pub fn run() {
             manifest::download_selected,
             manifest::load_manifest,
             manifest::load_settings,
-            manifest::prepare_download_root,
+            manifest::open_download_root,
             manifest::save_settings,
             manifest::update_manifest_from_git
         ])

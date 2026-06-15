@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
 import {
   ChevronRight,
   Download,
@@ -163,11 +162,10 @@ function App() {
     setIsOpeningDownloadRoot(true);
     setStatus("正在打开下载目录...");
     try {
-      const preparedPath = await invoke<string>("prepare_download_root", {
+      const preparedPath = await invoke<string>("open_download_root", {
         indexRepoPath: downloadSettings.indexRepoPath,
         downloadRoot: downloadSettings.downloadRoot,
       });
-      await openPath(preparedPath);
       setDownloadLog(`已打开下载目录：${preparedPath}`);
       setStatus("已打开下载目录");
     } catch (error) {

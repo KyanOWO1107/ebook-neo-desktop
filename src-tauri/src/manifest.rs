@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -8,6 +9,12 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_opener::OpenerExt;
+
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+#[cfg(test)]
+const PRODUCTION_CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost";
 
 #[derive(Debug, Deserialize)]
 struct RawManifestRecord {
@@ -55,7 +62,11 @@ pub fn parse_manifest_jsonl(input: &str) -> Result<Vec<ManifestRecord>, String> 
             let raw: RawManifestRecord = serde_json::from_str(line).map_err(|error| {
                 format!("Invalid manifest JSON on line {}: {}", index + 1, error)
             })?;
-            Ok(ManifestRecord::from(raw))
+            let record = ManifestRecord::from(raw);
+            validate_manifest_record(&record).map_err(|error| {
+                format!("Invalid manifest record on line {}: {}", index + 1, error)
+            })?;
+            Ok(record)
         })
         .collect()
 }
@@ -159,15 +170,9 @@ fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     if settings.download_root.trim().is_empty() {
         return Err("Download directory is required".to_string());
     }
-    if settings.rclone_path.trim().is_empty() {
-        return Err("rclone path is required".to_string());
-    }
-    if settings.remote.trim().is_empty() {
-        return Err("R2 remote is required".to_string());
-    }
-    if settings.bucket.trim().is_empty() {
-        return Err("R2 bucket is required".to_string());
-    }
+    validate_rclone_executable(&settings.rclone_path)?;
+    validate_remote_name(&settings.remote)?;
+    validate_bucket_name(&settings.bucket)?;
     if settings.download_jobs == 0 {
         return Err("Download jobs must be at least 1".to_string());
     }
@@ -282,9 +287,7 @@ fn validate_download_request(request: &DownloadRequest) -> Result<(), String> {
     if request.paths.is_empty() {
         return Err("Select at least one file before downloading".to_string());
     }
-    if request.rclone_path.trim().is_empty() {
-        return Err("rclone path is required".to_string());
-    }
+    validate_rclone_executable(&request.rclone_path)?;
     if request.download_jobs == 0 {
         return Err("Download jobs must be at least 1".to_string());
     }
@@ -294,12 +297,145 @@ fn validate_download_request(request: &DownloadRequest) -> Result<(), String> {
     if request.download_root.trim().is_empty() {
         return Err("Download directory is required".to_string());
     }
-    if request.remote.trim().is_empty() {
+    validate_remote_name(&request.remote)?;
+    validate_bucket_name(&request.bucket)?;
+    Ok(())
+}
+
+fn validate_rclone_executable(rclone_path: &str) -> Result<(), String> {
+    let trimmed = rclone_path.trim();
+    if trimmed.is_empty() {
+        return Err("rclone path is required".to_string());
+    }
+
+    let file_name = Path::new(trimmed)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
+    if file_name == "rclone" || file_name == "rclone.exe" {
+        Ok(())
+    } else {
+        Err("rclone path must point to rclone or rclone.exe".to_string())
+    }
+}
+
+fn validate_remote_name(remote: &str) -> Result<(), String> {
+    let trimmed = remote.trim().trim_end_matches(':');
+    if trimmed.is_empty() {
         return Err("R2 remote is required".to_string());
     }
-    if request.bucket.trim().is_empty() {
+    if trimmed
+        .bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' | b'.'))
+    {
+        Ok(())
+    } else {
+        Err("R2 remote contains unsupported characters".to_string())
+    }
+}
+
+fn validate_bucket_name(bucket: &str) -> Result<(), String> {
+    let trimmed = bucket.trim().trim_matches('/');
+    if trimmed.is_empty() {
         return Err("R2 bucket is required".to_string());
     }
+    if trimmed
+        .bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.'))
+    {
+        Ok(())
+    } else {
+        Err("R2 bucket contains unsupported characters".to_string())
+    }
+}
+
+fn manifest_path_boundary_error(manifest_path: &str) -> String {
+    format!("Manifest path must stay inside the download directory: {manifest_path}")
+}
+
+fn validate_manifest_path(manifest_path: &str) -> Result<Vec<&str>, String> {
+    if manifest_path.is_empty()
+        || manifest_path.contains('\\')
+        || manifest_path.contains(':')
+        || manifest_path.chars().any(char::is_control)
+    {
+        return Err(manifest_path_boundary_error(manifest_path));
+    }
+
+    let mut segments = Vec::new();
+    for segment in manifest_path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(manifest_path_boundary_error(manifest_path));
+        }
+        segments.push(segment);
+    }
+
+    Ok(segments)
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn validate_manifest_record(record: &ManifestRecord) -> Result<(), String> {
+    validate_manifest_path(&record.path)?;
+
+    if record.storage != "r2" || record.visibility != "private" {
+        return Err(format!(
+            "Manifest record must use private R2 storage: {}",
+            record.path
+        ));
+    }
+
+    if !is_lowercase_sha256(&record.sha256) {
+        return Err(format!("Manifest sha256 is invalid for {}", record.path));
+    }
+
+    if record.size == 0 && record.sha256 != EMPTY_SHA256 {
+        return Err(format!(
+            "0-byte manifest record has invalid sha256: {}",
+            record.path
+        ));
+    }
+
+    let object_key = record.object_key.as_str();
+    let key_is_plain_relative = !object_key.is_empty()
+        && object_key.trim() == object_key
+        && !object_key.starts_with('/')
+        && !object_key.contains('\\')
+        && !object_key.contains(':')
+        && !object_key.chars().any(char::is_control);
+    if !key_is_plain_relative {
+        return Err(format!(
+            "Manifest object key does not match sha256 layout for {}",
+            record.path
+        ));
+    }
+
+    let expected_prefix = format!(
+        "objects/sha256/{}/{}/{}/",
+        &record.sha256[..2],
+        &record.sha256[2..4],
+        record.sha256
+    );
+    let Some(file_name) = object_key.strip_prefix(&expected_prefix) else {
+        return Err(format!(
+            "Manifest object key does not match sha256 layout for {}",
+            record.path
+        ));
+    };
+
+    if file_name.is_empty() || file_name.contains('/') || file_name == "." || file_name == ".." {
+        return Err(format!(
+            "Manifest object key does not match sha256 layout for {}",
+            record.path
+        ));
+    }
+
     Ok(())
 }
 
@@ -310,37 +446,21 @@ fn build_rclone_cat_args(
 ) -> Result<Vec<String>, String> {
     let remote_name = remote.trim().trim_end_matches(':');
     let bucket_name = bucket.trim().trim_matches('/');
-    let object_key = record.object_key.trim().trim_start_matches('/');
-
-    if remote_name.is_empty() {
-        return Err("R2 remote is required".to_string());
-    }
-    if bucket_name.is_empty() {
-        return Err("R2 bucket is required".to_string());
-    }
-    if object_key.is_empty() {
-        return Err(format!(
-            "Manifest record has no object key: {}",
-            record.path
-        ));
-    }
+    validate_manifest_record(record)?;
+    validate_remote_name(remote)?;
+    validate_bucket_name(bucket)?;
 
     Ok(vec![
         "cat".to_string(),
-        format!("{remote_name}:{bucket_name}/{object_key}"),
+        format!("{remote_name}:{bucket_name}/{}", record.object_key),
     ])
 }
 
 fn build_rclone_lsf_args(remote: &str, bucket: &str) -> Result<Vec<String>, String> {
     let remote_name = remote.trim().trim_end_matches(':');
     let bucket_name = bucket.trim().trim_matches('/');
-
-    if remote_name.is_empty() {
-        return Err("R2 remote is required".to_string());
-    }
-    if bucket_name.is_empty() {
-        return Err("R2 bucket is required".to_string());
-    }
+    validate_remote_name(remote)?;
+    validate_bucket_name(bucket)?;
 
     Ok(vec![
         "lsf".to_string(),
@@ -399,18 +519,33 @@ fn build_destination_path(
     let base = resolve_download_root(index_root, download_root);
     let mut destination = base;
 
-    for component in Path::new(manifest_path).components() {
-        match component {
-            std::path::Component::Normal(part) => destination.push(part),
-            _ => {
-                return Err(format!(
-                    "Manifest path must stay inside the download directory: {manifest_path}"
-                ));
-            }
-        }
+    for segment in validate_manifest_path(manifest_path)? {
+        destination.push(segment);
     }
 
     Ok(destination)
+}
+
+fn ensure_destination_parent_inside_download_root(
+    index_root: &Path,
+    download_root: &str,
+    destination: &Path,
+    manifest_path: &str,
+) -> Result<(), String> {
+    let base = resolve_download_root(index_root, download_root);
+    let base = fs::canonicalize(&base)
+        .map_err(|error| format!("Failed to resolve {}: {}", base.display(), error))?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| manifest_path_boundary_error(manifest_path))?;
+    let parent = fs::canonicalize(parent)
+        .map_err(|error| format!("Failed to resolve {}: {}", parent.display(), error))?;
+
+    if parent.starts_with(&base) {
+        Ok(())
+    } else {
+        Err(manifest_path_boundary_error(manifest_path))
+    }
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -469,6 +604,19 @@ fn temp_download_path(destination: &Path) -> PathBuf {
     destination.with_file_name(format!("{file_name}.ebook-neo-part"))
 }
 
+fn remove_stale_temp_file(temp_path: &Path) -> Result<(), String> {
+    if fs::symlink_metadata(temp_path).is_ok() {
+        fs::remove_file(temp_path).map_err(|error| {
+            format!(
+                "Failed to remove stale temp file {}: {}",
+                temp_path.display(),
+                error
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn install_verified_download(temp_path: &Path, destination: &Path) -> Result<(), String> {
     if destination.is_file() {
         fs::remove_file(destination)
@@ -521,16 +669,26 @@ fn try_download_manifest_record_with_prefix_args(
     record: &ManifestRecord,
     prefix_args: &[&str],
 ) -> Result<DownloadItemResult, String> {
+    validate_manifest_record(record)?;
     let destination = build_destination_path(index_root, &request.download_root, &record.path)?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create {}: {}", parent.display(), error))?;
     }
+    ensure_destination_parent_inside_download_root(
+        index_root,
+        &request.download_root,
+        &destination,
+        &record.path,
+    )?;
 
+    let temp_path = temp_download_path(&destination);
+    remove_stale_temp_file(&temp_path)?;
     if record.size == 0 {
-        fs::write(&destination, [])
-            .map_err(|error| format!("Failed to write {}: {}", destination.display(), error))?;
-        verify_downloaded_file(&destination, record.size, &record.sha256)?;
+        fs::write(&temp_path, [])
+            .map_err(|error| format!("Failed to write {}: {}", temp_path.display(), error))?;
+        verify_downloaded_file(&temp_path, record.size, &record.sha256)?;
+        install_verified_download(&temp_path, &destination)?;
         return Ok(download_item_result(
             &record.path,
             "createdEmpty",
@@ -539,16 +697,6 @@ fn try_download_manifest_record_with_prefix_args(
     }
 
     let args = build_rclone_cat_args(&request.remote, &request.bucket, record)?;
-    let temp_path = temp_download_path(&destination);
-    if temp_path.is_file() {
-        fs::remove_file(&temp_path).map_err(|error| {
-            format!(
-                "Failed to remove stale temp file {}: {}",
-                temp_path.display(),
-                error
-            )
-        })?;
-    }
 
     let mut child = Command::new(&request.rclone_path)
         .args(prefix_args)
@@ -702,16 +850,19 @@ fn summarize_download_results(results: &[DownloadItemResult]) -> String {
     )
 }
 
-fn git_update_command_args() -> Vec<&'static str> {
-    vec!["pull", "--ff-only"]
+fn git_update_command_args(index_root: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("-C"),
+        index_root.as_os_str().to_os_string(),
+        OsString::from("pull"),
+        OsString::from("--ff-only"),
+    ]
 }
 
-#[tauri::command]
-pub fn update_manifest_from_git(index_repo_path: String) -> Result<CommandResult, String> {
+fn update_manifest_from_git_blocking(index_repo_path: String) -> Result<CommandResult, String> {
     let root = resolve_index_repo_path(&index_repo_path)?;
     let output = Command::new("git")
-        .args(git_update_command_args())
-        .current_dir(root)
+        .args(git_update_command_args(&root))
         .output()
         .map_err(|error| format!("Failed to start git update command: {}", error))?;
 
@@ -731,14 +882,18 @@ pub fn update_manifest_from_git(index_repo_path: String) -> Result<CommandResult
 }
 
 #[tauri::command]
-pub fn check_rclone_remote(
+pub async fn update_manifest_from_git(index_repo_path: String) -> Result<CommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || update_manifest_from_git_blocking(index_repo_path))
+        .await
+        .map_err(|error| format!("Git update worker failed: {}", error))?
+}
+
+fn check_rclone_remote_blocking(
     rclone_path: String,
     remote: String,
     bucket: String,
 ) -> Result<CommandResult, String> {
-    if rclone_path.trim().is_empty() {
-        return Err("rclone path is required".to_string());
-    }
+    validate_rclone_executable(&rclone_path)?;
 
     let args = build_rclone_lsf_args(&remote, &bucket)?;
     let output = Command::new(rclone_path.trim())
@@ -762,13 +917,35 @@ pub fn check_rclone_remote(
 }
 
 #[tauri::command]
-pub fn prepare_download_root(
+pub async fn check_rclone_remote(
+    rclone_path: String,
+    remote: String,
+    bucket: String,
+) -> Result<CommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        check_rclone_remote_blocking(rclone_path, remote, bucket)
+    })
+    .await
+    .map_err(|error| format!("rclone check worker failed: {}", error))?
+}
+
+#[tauri::command]
+pub async fn open_download_root(
+    app: AppHandle,
     index_repo_path: String,
     download_root: String,
 ) -> Result<String, String> {
-    let root = resolve_index_repo_path(&index_repo_path)?;
-    let directory = prepare_download_directory(&root, &download_root)?;
-    Ok(directory.to_string_lossy().into_owned())
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = resolve_index_repo_path(&index_repo_path)?;
+        let directory = prepare_download_directory(&root, &download_root)?;
+        let directory_text = directory.to_string_lossy().into_owned();
+        app.opener()
+            .open_path(directory_text.clone(), None::<String>)
+            .map_err(|error| format!("Failed to open download directory: {}", error))?;
+        Ok(directory_text)
+    })
+    .await
+    .map_err(|error| format!("Open download directory worker failed: {}", error))?
 }
 
 pub fn download_selected_blocking(request: DownloadRequest) -> Result<DownloadResult, String> {
@@ -797,17 +974,35 @@ pub async fn download_selected(request: DownloadRequest) -> Result<DownloadResul
 mod tests {
     use super::*;
 
+    fn object_key_for_sha(sha: &str, file_name: &str) -> String {
+        format!(
+            "objects/sha256/{}/{}/{}/{}",
+            &sha[..2],
+            &sha[2..4],
+            sha,
+            file_name
+        )
+    }
+
     #[test]
     fn parses_jsonl_manifest_records() {
-        let input = r#"{"path":"资料/a.pdf","object_key":"objects/a.pdf","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":123,"storage":"r2","updated_at":"2026-06-12","visibility":"private"}
-{"path":"课件/b.pptx","object_key":"objects/b.pptx","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":456,"storage":"r2","updated_at":"2026-06-12","visibility":"private"}
-"#;
+        let a_sha = "a".repeat(64);
+        let b_sha = "b".repeat(64);
+        let input = format!(
+            r#"{{"path":"资料/a.pdf","object_key":"{}","sha256":"{}","size":123,"storage":"r2","updated_at":"2026-06-12","visibility":"private"}}
+{{"path":"课件/b.pptx","object_key":"{}","sha256":"{}","size":456,"storage":"r2","updated_at":"2026-06-12","visibility":"private"}}
+"#,
+            object_key_for_sha(&a_sha, "a.pdf"),
+            a_sha,
+            object_key_for_sha(&b_sha, "b.pptx"),
+            b_sha
+        );
 
-        let records = parse_manifest_jsonl(input).expect("manifest should parse");
+        let records = parse_manifest_jsonl(&input).expect("manifest should parse");
 
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].path, "资料/a.pdf");
-        assert_eq!(records[0].object_key, "objects/a.pdf");
+        assert_eq!(records[0].object_key, object_key_for_sha(&a_sha, "a.pdf"));
         assert_eq!(records[1].size, 456);
     }
 
@@ -815,7 +1010,7 @@ mod tests {
     fn builds_rclone_cat_args_for_a_manifest_record() {
         let record = ManifestRecord {
             path: "资料/a.pdf".to_string(),
-            object_key: "objects/sha256/aa/a.pdf".to_string(),
+            object_key: object_key_for_sha(&"a".repeat(64), "a.pdf"),
             sha256: "a".repeat(64),
             size: 123,
             storage: "r2".to_string(),
@@ -834,9 +1029,107 @@ mod tests {
             args,
             vec![
                 "cat".to_string(),
-                "ebookneo-r2-readonly:tyut-ebooks-collection-neo/objects/sha256/aa/a.pdf"
-                    .to_string(),
+                format!(
+                    "ebookneo-r2-readonly:tyut-ebooks-collection-neo/objects/sha256/aa/aa/{}/a.pdf",
+                    "a".repeat(64)
+                ),
             ]
+        );
+    }
+
+    #[test]
+    fn rejects_manifest_record_with_object_key_outside_sha256_prefix() {
+        let record = ManifestRecord {
+            path: "资料/a.pdf".to_string(),
+            object_key: "other-prefix/a.pdf".to_string(),
+            sha256: "a".repeat(64),
+            size: 123,
+            storage: "r2".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "private".to_string(),
+        };
+
+        let error = build_rclone_cat_args(
+            "ebookneo-r2-readonly",
+            "tyut-ebooks-collection-neo",
+            &record,
+        )
+        .expect_err("unexpected object keys should be rejected");
+
+        assert_eq!(
+            error,
+            "Manifest object key does not match sha256 layout for 资料/a.pdf"
+        );
+    }
+
+    #[test]
+    fn rejects_manifest_record_with_invalid_sha256() {
+        let record = ManifestRecord {
+            path: "资料/a.pdf".to_string(),
+            object_key: "objects/sha256/aa/aa/not-a-sha/a.pdf".to_string(),
+            sha256: "not-a-sha".to_string(),
+            size: 123,
+            storage: "r2".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "private".to_string(),
+        };
+
+        let error = build_rclone_cat_args(
+            "ebookneo-r2-readonly",
+            "tyut-ebooks-collection-neo",
+            &record,
+        )
+        .expect_err("invalid sha256 should be rejected");
+
+        assert_eq!(error, "Manifest sha256 is invalid for 资料/a.pdf");
+    }
+
+    #[test]
+    fn rejects_manifest_record_with_unexpected_storage_or_visibility() {
+        let record = ManifestRecord {
+            path: "资料/a.pdf".to_string(),
+            object_key: object_key_for_sha(&"a".repeat(64), "a.pdf"),
+            sha256: "a".repeat(64),
+            size: 123,
+            storage: "local".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "public".to_string(),
+        };
+
+        let error = build_rclone_cat_args(
+            "ebookneo-r2-readonly",
+            "tyut-ebooks-collection-neo",
+            &record,
+        )
+        .expect_err("unexpected storage should be rejected");
+
+        assert_eq!(
+            error,
+            "Manifest record must use private R2 storage: 资料/a.pdf"
+        );
+    }
+
+    #[test]
+    fn rejects_non_rclone_executables() {
+        let error = validate_rclone_executable("powershell")
+            .expect_err("only rclone executables should be accepted");
+
+        assert_eq!(error, "rclone path must point to rclone or rclone.exe");
+        validate_rclone_executable("E:/Tools/rclone.exe")
+            .expect("full rclone.exe paths should be accepted");
+    }
+
+    #[test]
+    fn rejects_remote_and_bucket_names_with_unsupported_characters() {
+        assert_eq!(
+            validate_remote_name("ebookneo-r2-readonly;rm")
+                .expect_err("remote should reject shell-like punctuation"),
+            "R2 remote contains unsupported characters"
+        );
+        assert_eq!(
+            validate_bucket_name("Tyut_Bucket")
+                .expect_err("bucket should reject uppercase/underscore"),
+            "R2 bucket contains unsupported characters"
         );
     }
 
@@ -861,7 +1154,7 @@ mod tests {
         let records = vec![
             ManifestRecord {
                 path: "资料/a.pdf".to_string(),
-                object_key: "objects/sha256/aa/a.pdf".to_string(),
+                object_key: object_key_for_sha(&"a".repeat(64), "a.pdf"),
                 sha256: "a".repeat(64),
                 size: 123,
                 storage: "r2".to_string(),
@@ -870,7 +1163,7 @@ mod tests {
             },
             ManifestRecord {
                 path: "课件/b.pptx".to_string(),
-                object_key: "objects/sha256/bb/b.pptx".to_string(),
+                object_key: object_key_for_sha(&"b".repeat(64), "b.pptx"),
                 sha256: "b".repeat(64),
                 size: 456,
                 storage: "r2".to_string(),
@@ -889,7 +1182,7 @@ mod tests {
     fn rejects_missing_selected_manifest_path() {
         let records = vec![ManifestRecord {
             path: "资料/a.pdf".to_string(),
-            object_key: "objects/sha256/aa/a.pdf".to_string(),
+            object_key: object_key_for_sha(&"a".repeat(64), "a.pdf"),
             sha256: "a".repeat(64),
             size: 123,
             storage: "r2".to_string(),
@@ -955,6 +1248,46 @@ mod tests {
         assert_eq!(
             error,
             "Manifest path must stay inside the download directory: ../secret.pdf"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_manifest_paths_that_escape_download_root_through_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-symlink-download-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        let index_root = temp_dir.join("index");
+        let outside = temp_dir.join("outside");
+        fs::create_dir_all(index_root.join("downloads")).expect("download dir should be created");
+        fs::create_dir_all(&outside).expect("outside dir should be created");
+        symlink(&outside, index_root.join("downloads/link")).expect("symlink should be created");
+
+        let error = build_destination_path(&index_root, "downloads", "link/secret.txt")
+            .expect_err("symlink escape should be rejected");
+
+        assert_eq!(
+            error,
+            "Manifest path must stay inside the download directory: link/secret.txt"
+        );
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn rejects_manifest_paths_with_windows_absolute_prefixes() {
+        let root = PathBuf::from("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo");
+        let error = build_destination_path(&root, "downloads/gui", "C:/Windows/win.ini")
+            .expect_err("Windows absolute-style manifest paths should fail");
+
+        assert_eq!(
+            error,
+            "Manifest path must stay inside the download directory: C:/Windows/win.ini"
         );
     }
 
@@ -1040,7 +1373,10 @@ mod tests {
         };
         let record = ManifestRecord {
             path: "资料/a.txt".to_string(),
-            object_key: "objects/sha256/ba/a.txt".to_string(),
+            object_key: object_key_for_sha(
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "a.txt",
+            ),
             sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(),
             size: 3,
             storage: "r2".to_string(),
@@ -1118,7 +1454,10 @@ exit 1
         let records = vec![
             ManifestRecord {
                 path: "资料/good.txt".to_string(),
-                object_key: "objects/sha256/good.txt".to_string(),
+                object_key: object_key_for_sha(
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                    "good.txt",
+                ),
                 sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
                     .to_string(),
                 size: 3,
@@ -1128,7 +1467,7 @@ exit 1
             },
             ManifestRecord {
                 path: "资料/bad.txt".to_string(),
-                object_key: "objects/sha256/bad.txt".to_string(),
+                object_key: object_key_for_sha(&"a".repeat(64), "bad.txt"),
                 sha256: "a".repeat(64),
                 size: 3,
                 storage: "r2".to_string(),
@@ -1199,6 +1538,40 @@ exit 1
     }
 
     #[test]
+    fn async_update_manifest_command_uses_blocking_worker() {
+        fn assert_command_future<F>(future: F) -> F
+        where
+            F: std::future::Future<Output = Result<CommandResult, String>>,
+        {
+            future
+        }
+
+        let future = assert_command_future(update_manifest_from_git(
+            "../TYUT-ebooks-collection-neo".to_string(),
+        ));
+
+        let _ = future;
+    }
+
+    #[test]
+    fn async_rclone_check_command_uses_blocking_worker() {
+        fn assert_command_future<F>(future: F) -> F
+        where
+            F: std::future::Future<Output = Result<CommandResult, String>>,
+        {
+            future
+        }
+
+        let future = assert_command_future(check_rclone_remote(
+            "rclone".to_string(),
+            "ebookneo-r2-readonly".to_string(),
+            "tyut-ebooks-collection-neo".to_string(),
+        ));
+
+        let _ = future;
+    }
+
+    #[test]
     fn opener_capability_allows_open_path() {
         let capability_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
@@ -1206,9 +1579,23 @@ exit 1
             fs::read_to_string(capability_path).expect("default capability should be readable");
 
         assert!(
-            contents.contains("\"opener:allow-open-path\""),
-            "openPath requires opener:allow-open-path permission"
+            !contents.contains("opener:allow-open-path"),
+            "frontend opener permissions should stay disabled; open the prepared download root through a Rust command"
         );
+    }
+
+    #[test]
+    fn tauri_config_enables_a_production_csp() {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+        let contents = fs::read_to_string(config_path).expect("tauri config should be readable");
+        let config: serde_json::Value =
+            serde_json::from_str(&contents).expect("tauri config should parse");
+        let csp = config["app"]["security"]["csp"]
+            .as_str()
+            .expect("production CSP should be configured as a string");
+
+        assert_eq!(csp, PRODUCTION_CSP);
+        assert!(!csp.contains("unsafe-eval"));
     }
 
     #[test]
@@ -1304,7 +1691,16 @@ exit 1
 
     #[test]
     fn builds_git_update_command_args() {
-        assert_eq!(git_update_command_args(), vec!["pull", "--ff-only"]);
+        let root = PathBuf::from("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo");
+        assert_eq!(
+            git_update_command_args(&root),
+            vec![
+                OsString::from("-C"),
+                root.as_os_str().to_os_string(),
+                OsString::from("pull"),
+                OsString::from("--ff-only")
+            ]
+        );
     }
 
     #[test]

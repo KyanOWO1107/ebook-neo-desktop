@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 
 import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import App from "./App";
@@ -9,10 +8,6 @@ import { defaultAppSettings, type ManifestRecord } from "./manifest";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
-}));
-
-vi.mock("@tauri-apps/plugin-opener", () => ({
-  openPath: vi.fn(),
 }));
 
 const records: ManifestRecord[] = [
@@ -31,10 +26,6 @@ function mockedInvoke() {
   return invoke as Mock;
 }
 
-function mockedOpenPath() {
-  return openPath as Mock;
-}
-
 describe("App", () => {
   beforeEach(() => {
     mockedInvoke().mockImplementation((command: string) => {
@@ -47,7 +38,7 @@ describe("App", () => {
       if (command === "check_rclone_remote") {
         return Promise.resolve({ stdout: "objects/\n", stderr: "" });
       }
-      if (command === "prepare_download_root") {
+      if (command === "open_download_root") {
         return Promise.resolve("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo/downloads/gui");
       }
       if (command === "download_selected") {
@@ -65,7 +56,6 @@ describe("App", () => {
       }
       return Promise.resolve({ stdout: "", stderr: "" });
     });
-    mockedOpenPath().mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -119,12 +109,12 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "打开目录" }));
 
     await waitFor(() =>
-      expect(mockedInvoke()).toHaveBeenCalledWith("prepare_download_root", {
+      expect(mockedInvoke()).toHaveBeenCalledWith("open_download_root", {
         indexRepoPath: defaultAppSettings.indexRepoPath,
         downloadRoot: defaultAppSettings.downloadRoot,
       }),
     );
-    expect(mockedOpenPath()).toHaveBeenCalledWith("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo/downloads/gui");
+    expect(await screen.findByText("已打开下载目录")).toBeTruthy();
   });
 
   it("shows failed download rows and retries only failed paths", async () => {

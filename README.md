@@ -25,7 +25,7 @@ TYUT-ebooks-collection-neo/docs/collaborator-quickstart.md
 
 所有平台都需要：
 
-- Node.js 和 npm。
+- Node.js `20.19+` 或 `22.12+`，以及 npm。
 - Rust 和 Cargo。
 - rclone，并且已经配置只读 R2 remote。
 - 本地克隆 `TYUT-ebooks-collection-neo` 索引仓库。
@@ -54,7 +54,7 @@ path\to\TYUT-ebooks-collection-neo
 your-rclone-path\rclone.exe
 ```
 
-Linux/macOS 协作者通常可以保持 `rclone`。如果没有加入 PATH，也可以填写绝对路径，例如 `/usr/local/bin/rclone`。
+Linux/macOS 协作者通常可以保持 `rclone`。如果没有加入 PATH，也可以填写绝对路径，例如 `/usr/local/bin/rclone`。应用会校验这个路径的文件名必须是 `rclone` 或 `rclone.exe`。
 
 ## 开发命令
 
