@@ -15,6 +15,12 @@
 
 当前版本不包含上传、账号管理或公开下载功能。上传和 manifest 生成仍由维护者在本地命令行完成，并通过 Git/GitHub 推送。
 
+协作者从零开始配置和下载资料，可先看索引仓库中的短指南：
+
+```text
+TYUT-ebooks-collection-neo/docs/collaborator-quickstart.md
+```
+
 ## 前置条件
 
 所有平台都需要：
