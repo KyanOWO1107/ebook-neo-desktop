@@ -771,8 +771,7 @@ pub fn prepare_download_root(
     Ok(directory.to_string_lossy().into_owned())
 }
 
-#[tauri::command]
-pub fn download_selected(request: DownloadRequest) -> Result<DownloadResult, String> {
+pub fn download_selected_blocking(request: DownloadRequest) -> Result<DownloadResult, String> {
     let root = resolve_index_repo_path(&request.index_repo_path)?;
     validate_download_request(&request)?;
     let manifest_path = root.join("manifests/files.jsonl");
@@ -785,6 +784,13 @@ pub fn download_selected(request: DownloadRequest) -> Result<DownloadResult, Str
         stderr: String::new(),
         items,
     })
+}
+
+#[tauri::command]
+pub async fn download_selected(request: DownloadRequest) -> Result<DownloadResult, String> {
+    tauri::async_runtime::spawn_blocking(move || download_selected_blocking(request))
+        .await
+        .map_err(|error| format!("Download worker failed: {}", error))?
 }
 
 #[cfg(test)]
@@ -1166,6 +1172,43 @@ exit 1
         };
 
         validate_download_request(&request).expect("download request should validate");
+    }
+
+    #[test]
+    fn async_download_command_uses_blocking_worker() {
+        fn assert_download_future<F>(future: F) -> F
+        where
+            F: std::future::Future<Output = Result<DownloadResult, String>>,
+        {
+            future
+        }
+
+        let request = DownloadRequest {
+            index_repo_path: "../TYUT-ebooks-collection-neo".to_string(),
+            paths: vec!["资料/a.pdf".to_string()],
+            download_root: "downloads/gui".to_string(),
+            rclone_path: "rclone".to_string(),
+            remote: "ebookneo-r2-readonly".to_string(),
+            bucket: "tyut-ebooks-collection-neo".to_string(),
+            download_jobs: 1,
+        };
+
+        let future = assert_download_future(download_selected(request));
+
+        let _ = future;
+    }
+
+    #[test]
+    fn opener_capability_allows_open_path() {
+        let capability_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
+        let contents =
+            fs::read_to_string(capability_path).expect("default capability should be readable");
+
+        assert!(
+            contents.contains("\"opener:allow-open-path\""),
+            "openPath requires opener:allow-open-path permission"
+        );
     }
 
     #[test]
