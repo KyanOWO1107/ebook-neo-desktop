@@ -23,6 +23,7 @@ import {
   filterRecords,
   formatBytes,
   mergeAppSettings,
+  recordsForFolderSelection,
   summarizeRecords,
   themeAttribute,
   type AppSettings,
@@ -210,6 +211,17 @@ function App() {
     });
   }
 
+  function selectActiveFolder() {
+    const folderRecords = recordsForFolderSelection(records, activeFolder, query);
+    setSelectedPaths((current) => {
+      const next = new Set(current);
+      for (const record of folderRecords) {
+        next.add(record.path);
+      }
+      return next;
+    });
+  }
+
   function clearSelection() {
     setSelectedPaths(new Set());
   }
@@ -388,6 +400,9 @@ function App() {
               <div className="selection-actions">
                 <button type="button" onClick={selectVisible} disabled={visibleRecords.length === 0}>
                   选中当前列表
+                </button>
+                <button type="button" onClick={selectActiveFolder} disabled={!activeFolder}>
+                  选中当前目录
                 </button>
                 <button type="button" onClick={clearSelection} disabled={selectedPaths.size === 0}>
                   清空

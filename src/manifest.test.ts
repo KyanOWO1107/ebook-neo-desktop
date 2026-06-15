@@ -6,6 +6,7 @@ import {
   clampDownloadJobs,
   filterRecords,
   formatBytes,
+  recordsForFolderSelection,
   mergeAppSettings,
   themeAttribute,
   summarizeRecords,
@@ -73,6 +74,17 @@ describe("manifest helpers", () => {
 
   it("filters records by case-insensitive path text", () => {
     expect(filterRecords(records, "DOCX").map((record) => record.path)).toEqual([
+      "资料/数据结构/实验/b.docx",
+    ]);
+  });
+
+  it("selects all matching records under the active folder", () => {
+    expect(recordsForFolderSelection(records, "资料/数据结构", "").map((record) => record.path)).toEqual([
+      "资料/数据结构/a.pdf",
+      "资料/数据结构/实验/b.docx",
+    ]);
+
+    expect(recordsForFolderSelection(records, "资料/数据结构", "docx").map((record) => record.path)).toEqual([
       "资料/数据结构/实验/b.docx",
     ]);
   });

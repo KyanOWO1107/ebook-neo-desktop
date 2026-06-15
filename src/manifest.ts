@@ -116,6 +116,17 @@ export function filterRecords(records: ManifestRecord[], query: string): Manifes
   return records.filter((record) => record.path.toLocaleLowerCase().includes(normalizedQuery));
 }
 
+export function recordsForFolderSelection(
+  records: ManifestRecord[],
+  activeFolder: string | null,
+  query: string,
+): ManifestRecord[] {
+  const folderRecords = activeFolder
+    ? records.filter((record) => record.path === activeFolder || record.path.startsWith(`${activeFolder}/`))
+    : records;
+  return filterRecords(folderRecords, query);
+}
+
 export function formatBytes(bytes: number): string {
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   let value = bytes;
