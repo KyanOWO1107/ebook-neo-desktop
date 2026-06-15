@@ -1,5 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronRight, Download, Folder, Moon, RefreshCw, Save, Search, Sun, UploadCloud } from "lucide-react";
+import { openPath } from "@tauri-apps/plugin-opener";
+import {
+  ChevronRight,
+  Download,
+  Folder,
+  FolderOpen,
+  Moon,
+  RefreshCw,
+  Save,
+  Search,
+  Sun,
+  UploadCloud,
+  Wifi,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import {
@@ -37,6 +50,8 @@ function App() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [isUpdatingManifest, setIsUpdatingManifest] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isCheckingRemote, setIsCheckingRemote] = useState(false);
+  const [isOpeningDownloadRoot, setIsOpeningDownloadRoot] = useState(false);
   const [downloadLog, setDownloadLog] = useState("等待选择...");
   const [downloadSettings, setDownloadSettings] = useState<AppSettings>(defaultAppSettings);
 
@@ -106,6 +121,51 @@ function App() {
       setStatus("资源表更新失败");
     } finally {
       setIsUpdatingManifest(false);
+    }
+  }
+
+  async function checkRcloneRemote() {
+    if (isCheckingRemote) {
+      return;
+    }
+    setIsCheckingRemote(true);
+    setStatus("正在检查 R2 只读连接...");
+    try {
+      const result = await invoke<CommandResult>("check_rclone_remote", {
+        rclonePath: downloadSettings.rclonePath,
+        remote: downloadSettings.remote,
+        bucket: downloadSettings.bucket,
+      });
+      const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n\n");
+      setDownloadLog(output || "R2 连接正常");
+      setStatus("R2 连接正常");
+    } catch (error) {
+      setDownloadLog(error instanceof Error ? error.message : String(error));
+      setStatus("R2 连接检查失败");
+    } finally {
+      setIsCheckingRemote(false);
+    }
+  }
+
+  async function openDownloadRoot() {
+    if (isOpeningDownloadRoot) {
+      return;
+    }
+    setIsOpeningDownloadRoot(true);
+    setStatus("正在打开下载目录...");
+    try {
+      const preparedPath = await invoke<string>("prepare_download_root", {
+        indexRepoPath: downloadSettings.indexRepoPath,
+        downloadRoot: downloadSettings.downloadRoot,
+      });
+      await openPath(preparedPath);
+      setDownloadLog(`已打开下载目录：${preparedPath}`);
+      setStatus("已打开下载目录");
+    } catch (error) {
+      setDownloadLog(error instanceof Error ? error.message : String(error));
+      setStatus("打开下载目录失败");
+    } finally {
+      setIsOpeningDownloadRoot(false);
     }
   }
 
@@ -451,6 +511,26 @@ function App() {
               <Save size={16} />
               {isSavingSettings ? "保存中" : "保存设置"}
             </button>
+            <div className="utility-actions">
+              <button
+                className="secondary-action"
+                type="button"
+                onClick={checkRcloneRemote}
+                disabled={isCheckingRemote}
+              >
+                <Wifi size={16} />
+                {isCheckingRemote ? "检查中" : "检查 R2"}
+              </button>
+              <button
+                className="secondary-action"
+                type="button"
+                onClick={openDownloadRoot}
+                disabled={isOpeningDownloadRoot}
+              >
+                <FolderOpen size={16} />
+                {isOpeningDownloadRoot ? "打开中" : "打开目录"}
+              </button>
+            </div>
             <pre className="command-preview">{selectedRecords.length > 0 ? downloadLog : "等待选择..."}</pre>
             <button
               className="primary-action"

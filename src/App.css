@@ -541,6 +541,12 @@ button.folder-disclosure:hover {
   border: 1px solid var(--border);
 }
 
+.utility-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 .primary-action:disabled,
 .secondary-action:disabled {
   cursor: default;

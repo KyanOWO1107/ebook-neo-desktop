@@ -5,9 +5,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            manifest::check_rclone_remote,
             manifest::download_selected,
             manifest::load_manifest,
             manifest::load_settings,
+            manifest::prepare_download_root,
             manifest::save_settings,
             manifest::update_manifest_from_git
         ])

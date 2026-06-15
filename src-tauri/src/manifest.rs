@@ -322,6 +322,25 @@ fn build_rclone_cat_args(
     ])
 }
 
+fn build_rclone_lsf_args(remote: &str, bucket: &str) -> Result<Vec<String>, String> {
+    let remote_name = remote.trim().trim_end_matches(':');
+    let bucket_name = bucket.trim().trim_matches('/');
+
+    if remote_name.is_empty() {
+        return Err("R2 remote is required".to_string());
+    }
+    if bucket_name.is_empty() {
+        return Err("R2 bucket is required".to_string());
+    }
+
+    Ok(vec![
+        "lsf".to_string(),
+        format!("{remote_name}:{bucket_name}"),
+        "--max-depth".to_string(),
+        "1".to_string(),
+    ])
+}
+
 fn select_records_by_paths(
     records: &[ManifestRecord],
     paths: &[String],
@@ -349,6 +368,18 @@ fn resolve_download_root(index_root: &Path, download_root: &str) -> PathBuf {
     } else {
         index_root.join(configured)
     }
+}
+
+fn prepare_download_directory(index_root: &Path, download_root: &str) -> Result<PathBuf, String> {
+    if download_root.trim().is_empty() {
+        return Err("Download directory is required".to_string());
+    }
+
+    let directory = resolve_download_root(index_root, download_root);
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("Failed to create {}: {}", directory.display(), error))?;
+    fs::canonicalize(&directory)
+        .map_err(|error| format!("Failed to resolve {}: {}", directory.display(), error))
 }
 
 fn build_destination_path(
@@ -670,6 +701,47 @@ pub fn update_manifest_from_git(index_repo_path: String) -> Result<CommandResult
 }
 
 #[tauri::command]
+pub fn check_rclone_remote(
+    rclone_path: String,
+    remote: String,
+    bucket: String,
+) -> Result<CommandResult, String> {
+    if rclone_path.trim().is_empty() {
+        return Err("rclone path is required".to_string());
+    }
+
+    let args = build_rclone_lsf_args(&remote, &bucket)?;
+    let output = Command::new(rclone_path.trim())
+        .args(args)
+        .output()
+        .map_err(|error| format!("Failed to start rclone check command: {}", error))?;
+
+    let result = CommandResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+
+    if output.status.success() {
+        Ok(result)
+    } else {
+        Err(format!(
+            "rclone check failed with status {}.\n{}\n{}",
+            output.status, result.stdout, result.stderr
+        ))
+    }
+}
+
+#[tauri::command]
+pub fn prepare_download_root(
+    index_repo_path: String,
+    download_root: String,
+) -> Result<String, String> {
+    let root = resolve_index_repo_path(&index_repo_path)?;
+    let directory = prepare_download_directory(&root, &download_root)?;
+    Ok(directory.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 pub fn download_selected(request: DownloadRequest) -> Result<DownloadResult, String> {
     let root = resolve_index_repo_path(&request.index_repo_path)?;
     validate_download_request(&request)?;
@@ -736,6 +808,22 @@ mod tests {
     }
 
     #[test]
+    fn builds_read_only_rclone_check_args() {
+        let args = build_rclone_lsf_args("ebookneo-r2-readonly:", "/tyut-ebooks-collection-neo/")
+            .expect("rclone check args should build");
+
+        assert_eq!(
+            args,
+            vec![
+                "lsf".to_string(),
+                "ebookneo-r2-readonly:tyut-ebooks-collection-neo".to_string(),
+                "--max-depth".to_string(),
+                "1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn selects_manifest_records_by_requested_paths() {
         let records = vec![
             ManifestRecord {
@@ -797,6 +885,32 @@ mod tests {
                 .join("downloads/gui")
                 .join("资料/数据结构/a.pdf")
         );
+    }
+
+    #[test]
+    fn prepares_download_directory_under_index_root() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-download-dir-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_dir.join("manifests")).expect("manifests dir should be created");
+        fs::write(temp_dir.join("manifests/files.jsonl"), "").expect("manifest should be created");
+
+        let prepared = prepare_download_directory(&temp_dir, "downloads/gui")
+            .expect("directory should be prepared");
+
+        assert!(prepared.is_absolute());
+        assert!(prepared.is_dir());
+        assert_eq!(
+            prepared,
+            fs::canonicalize(temp_dir.join("downloads/gui"))
+                .expect("download dir should canonicalize")
+        );
+
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
     }
 
     #[test]
