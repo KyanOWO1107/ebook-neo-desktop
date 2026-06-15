@@ -379,45 +379,50 @@ function App() {
                 <span>索引仓库</span>
                 <input
                   value={downloadSettings.indexRepoPath}
-                  onChange={(event) =>
-                    setDownloadSettings((settings) => ({ ...settings, indexRepoPath: event.currentTarget.value }))
-                  }
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setDownloadSettings((settings) => ({ ...settings, indexRepoPath: value }));
+                  }}
                 />
               </label>
               <label className="settings-wide">
                 <span>下载目录</span>
                 <input
                   value={downloadSettings.downloadRoot}
-                  onChange={(event) =>
-                    setDownloadSettings((settings) => ({ ...settings, downloadRoot: event.currentTarget.value }))
-                  }
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setDownloadSettings((settings) => ({ ...settings, downloadRoot: value }));
+                  }}
                 />
               </label>
               <label className="settings-wide">
                 <span>rclone</span>
                 <input
                   value={downloadSettings.rclonePath}
-                  onChange={(event) =>
-                    setDownloadSettings((settings) => ({ ...settings, rclonePath: event.currentTarget.value }))
-                  }
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setDownloadSettings((settings) => ({ ...settings, rclonePath: value }));
+                  }}
                 />
               </label>
               <label className="settings-wide">
                 <span>Remote</span>
                 <input
                   value={downloadSettings.remote}
-                  onChange={(event) =>
-                    setDownloadSettings((settings) => ({ ...settings, remote: event.currentTarget.value }))
-                  }
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setDownloadSettings((settings) => ({ ...settings, remote: value }));
+                  }}
                 />
               </label>
               <label className="settings-wide">
                 <span>Bucket</span>
                 <input
                   value={downloadSettings.bucket}
-                  onChange={(event) =>
-                    setDownloadSettings((settings) => ({ ...settings, bucket: event.currentTarget.value }))
-                  }
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setDownloadSettings((settings) => ({ ...settings, bucket: value }));
+                  }}
                 />
               </label>
               <label>
@@ -427,12 +432,13 @@ function App() {
                   max={16}
                   type="number"
                   value={downloadSettings.downloadJobs}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const value = Number(event.currentTarget.value);
                     setDownloadSettings((settings) => ({
                       ...settings,
-                      downloadJobs: clampDownloadJobs(Number(event.currentTarget.value)),
-                    }))
-                  }
+                      downloadJobs: clampDownloadJobs(value),
+                    }));
+                  }}
                 />
               </label>
             </div>

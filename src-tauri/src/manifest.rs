@@ -216,21 +216,42 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<AppSetting
 }
 
 fn resolve_index_repo_path(index_repo_path: &str) -> Result<PathBuf, String> {
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("Failed to resolve current directory: {}", error))?;
+    resolve_index_repo_path_from(index_repo_path, &current_dir)
+}
+
+fn resolve_index_repo_path_from(index_repo_path: &str, base_dir: &Path) -> Result<PathBuf, String> {
     let trimmed = index_repo_path.trim();
     if trimmed.is_empty() {
         return Err("Index repository path is required".to_string());
     }
 
     let configured_path = PathBuf::from(trimmed);
-    let candidate = if configured_path.is_absolute() {
-        configured_path
+    let is_absolute = configured_path.is_absolute();
+    let first_candidate = if is_absolute {
+        configured_path.clone()
     } else {
-        std::env::current_dir()
-            .map_err(|error| format!("Failed to resolve current directory: {}", error))?
-            .join(configured_path)
+        base_dir.join(&configured_path)
     };
 
-    let root = fs::canonicalize(&candidate).map_err(|error| {
+    let root = canonicalize_index_repo_candidate(&first_candidate).or_else(|first_error| {
+        if is_absolute || base_dir.file_name().and_then(|name| name.to_str()) != Some("src-tauri") {
+            return Err(first_error);
+        }
+
+        let Some(project_root) = base_dir.parent() else {
+            return Err(first_error);
+        };
+        let project_root_candidate = project_root.join(&configured_path);
+        canonicalize_index_repo_candidate(&project_root_candidate).map_err(|_| first_error)
+    })?;
+
+    Ok(root)
+}
+
+fn canonicalize_index_repo_candidate(candidate: &Path) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(candidate).map_err(|error| {
         format!(
             "Failed to resolve index repository path {}: {}",
             candidate.display(),
@@ -375,7 +396,7 @@ fn verify_downloaded_file(
     let mut file = fs::File::open(path)
         .map_err(|error| format!("Failed to open {}: {}", path.display(), error))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    let mut buffer = vec![0_u8; 1024 * 1024];
 
     loop {
         let read = file
@@ -814,6 +835,37 @@ mod tests {
     }
 
     #[test]
+    fn verifies_downloaded_file_on_small_stack() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-small-stack-verify-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let file_path = temp_dir.join("abc.txt");
+        fs::write(&file_path, b"abc").expect("test file should be written");
+
+        let file_path_for_thread = file_path.clone();
+        let verify_result = thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                verify_downloaded_file(
+                    &file_path_for_thread,
+                    3,
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                )
+            })
+            .expect("verification thread should spawn")
+            .join()
+            .expect("verification should not overflow the stack");
+
+        verify_result.expect("file should verify");
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
     fn download_records_streams_rclone_output_and_verifies_file() {
         let temp_dir = std::env::temp_dir().join(format!(
             "ebook-neo-direct-download-test-{}",
@@ -862,11 +914,16 @@ mod tests {
         )
         .expect("download should complete");
         let downloaded = temp_dir.join("downloads").join("资料/a.txt");
+        let temp_downloaded = temp_download_path(&downloaded);
 
         assert_eq!(messages, vec!["downloaded 资料/a.txt"]);
         assert_eq!(
             fs::read(downloaded).expect("downloaded file should exist"),
             b"abc"
+        );
+        assert!(
+            !temp_downloaded.exists(),
+            "temporary download file should be moved into place"
         );
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
     }
@@ -1001,5 +1058,31 @@ mod tests {
 
         assert_eq!(resolved, expected);
         fs::remove_dir_all(&resolved).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn resolves_default_index_repository_relative_to_project_root_from_src_tauri() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-index-repo-src-tauri-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        let app_root = temp_dir.join("ebook-neo-desktop");
+        let src_tauri_dir = app_root.join("src-tauri");
+        let index_root = temp_dir.join("TYUT-ebooks-collection-neo");
+        fs::create_dir_all(&src_tauri_dir).expect("src-tauri dir should be created");
+        fs::create_dir_all(index_root.join("manifests")).expect("manifests dir should be created");
+        fs::write(index_root.join("manifests/files.jsonl"), "")
+            .expect("manifest should be created");
+
+        let expected = fs::canonicalize(&index_root).expect("index root should canonicalize");
+        let resolved =
+            resolve_index_repo_path_from("../TYUT-ebooks-collection-neo", &src_tauri_dir)
+                .expect("index repo path should resolve from project root");
+
+        assert_eq!(resolved, expected);
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
     }
 }
