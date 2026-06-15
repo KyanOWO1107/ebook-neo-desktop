@@ -99,6 +99,15 @@ pub struct DownloadRequest {
 pub struct DownloadResult {
     pub stdout: String,
     pub stderr: String,
+    pub items: Vec<DownloadItemResult>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadItemResult {
+    pub path: String,
+    pub status: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -486,12 +495,32 @@ where
     }
 }
 
+fn download_item_result(path: &str, status: &str, message: String) -> DownloadItemResult {
+    DownloadItemResult {
+        path: path.to_string(),
+        status: status.to_string(),
+        message,
+    }
+}
+
 fn download_manifest_record_with_prefix_args(
     index_root: &Path,
     request: &DownloadRequest,
     record: &ManifestRecord,
     prefix_args: &[&str],
-) -> Result<String, String> {
+) -> DownloadItemResult {
+    match try_download_manifest_record_with_prefix_args(index_root, request, record, prefix_args) {
+        Ok(result) => result,
+        Err(error) => download_item_result(&record.path, "failed", error),
+    }
+}
+
+fn try_download_manifest_record_with_prefix_args(
+    index_root: &Path,
+    request: &DownloadRequest,
+    record: &ManifestRecord,
+    prefix_args: &[&str],
+) -> Result<DownloadItemResult, String> {
     let destination = build_destination_path(index_root, &request.download_root, &record.path)?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
@@ -502,7 +531,11 @@ fn download_manifest_record_with_prefix_args(
         fs::write(&destination, [])
             .map_err(|error| format!("Failed to write {}: {}", destination.display(), error))?;
         verify_downloaded_file(&destination, record.size, &record.sha256)?;
-        return Ok(format!("created empty file {}", record.path));
+        return Ok(download_item_result(
+            &record.path,
+            "createdEmpty",
+            format!("created empty file {}", record.path),
+        ));
     }
 
     let args = build_rclone_cat_args(&request.remote, &request.bucket, record)?;
@@ -574,14 +607,18 @@ fn download_manifest_record_with_prefix_args(
     verify_downloaded_file(&temp_path, record.size, &record.sha256)?;
     install_verified_download(&temp_path, &destination)?;
 
-    Ok(format!("downloaded {}", record.path))
+    Ok(download_item_result(
+        &record.path,
+        "downloaded",
+        format!("downloaded {}", record.path),
+    ))
 }
 
 fn download_records(
     index_root: &Path,
     request: &DownloadRequest,
     records: Vec<ManifestRecord>,
-) -> Result<Vec<String>, String> {
+) -> Vec<DownloadItemResult> {
     download_records_with_prefix_args(index_root, request, records, &[])
 }
 
@@ -590,7 +627,7 @@ fn download_records_with_prefix_args(
     request: &DownloadRequest,
     records: Vec<ManifestRecord>,
     prefix_args: &[&str],
-) -> Result<Vec<String>, String> {
+) -> Vec<DownloadItemResult> {
     let mut deduped = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for record in records {
@@ -609,25 +646,15 @@ fn download_records_with_prefix_args(
     }
 
     let queue = Arc::new(Mutex::new(VecDeque::from(deduped)));
-    let messages = Arc::new(Mutex::new(Vec::new()));
-    let first_error = Arc::new(Mutex::new(None::<String>));
+    let results = Arc::new(Mutex::new(Vec::new()));
     let worker_count = usize::min(request.download_jobs as usize, request.paths.len());
 
     thread::scope(|scope| {
         for _ in 0..worker_count {
             let queue = Arc::clone(&queue);
-            let messages = Arc::clone(&messages);
-            let first_error = Arc::clone(&first_error);
+            let results = Arc::clone(&results);
 
             scope.spawn(move || loop {
-                if first_error
-                    .lock()
-                    .expect("error lock should not be poisoned")
-                    .is_some()
-                {
-                    return;
-                }
-
                 let record = {
                     let mut queue = queue.lock().expect("queue lock should not be poisoned");
                     queue.pop_front()
@@ -637,41 +664,44 @@ fn download_records_with_prefix_args(
                     return;
                 };
 
-                match download_manifest_record_with_prefix_args(
+                let result = download_manifest_record_with_prefix_args(
                     index_root,
                     request,
                     &record,
                     prefix_args,
-                ) {
-                    Ok(message) => messages
-                        .lock()
-                        .expect("message lock should not be poisoned")
-                        .push(message),
-                    Err(error) => {
-                        *first_error
-                            .lock()
-                            .expect("error lock should not be poisoned") = Some(error);
-                        return;
-                    }
-                }
+                );
+                results
+                    .lock()
+                    .expect("result lock should not be poisoned")
+                    .push(result);
             });
         }
     });
 
-    if let Some(error) = first_error
+    let collected_results = results
         .lock()
-        .expect("error lock should not be poisoned")
-        .clone()
-    {
-        return Err(error);
-    }
-
-    let collected_messages = messages
-        .lock()
-        .expect("message lock should not be poisoned")
+        .expect("result lock should not be poisoned")
         .clone();
-    Ok(collected_messages)
+    collected_results
 }
+
+fn summarize_download_results(results: &[DownloadItemResult]) -> String {
+    let succeeded = results
+        .iter()
+        .filter(|result| result.status != "failed")
+        .count();
+    let failed = results.len().saturating_sub(succeeded);
+    let messages = results
+        .iter()
+        .map(|result| format!("{}: {}", result.status, result.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Downloaded {} file(s), {} failed.\n{}",
+        succeeded, failed, messages
+    )
+}
+
 fn git_update_command_args() -> Vec<&'static str> {
     vec!["pull", "--ff-only"]
 }
@@ -748,15 +778,12 @@ pub fn download_selected(request: DownloadRequest) -> Result<DownloadResult, Str
     let manifest_path = root.join("manifests/files.jsonl");
     let records = load_manifest_from_path(&manifest_path)?;
     let selected = select_records_by_paths(&records, &request.paths)?;
-    let messages = download_records(&root, &request, selected)?;
+    let items = download_records(&root, &request, selected);
 
     Ok(DownloadResult {
-        stdout: format!(
-            "Downloaded {} file(s) with rclone cat.\n{}",
-            messages.len(),
-            messages.join("\n")
-        ),
+        stdout: summarize_download_results(&items),
         stderr: String::new(),
+        items,
     })
 }
 
@@ -1015,7 +1042,7 @@ mod tests {
             visibility: "private".to_string(),
         };
 
-        let messages = download_records_with_prefix_args(
+        let results = download_records_with_prefix_args(
             &temp_dir,
             &request,
             vec![record],
@@ -1025,12 +1052,18 @@ mod tests {
                     .to_str()
                     .expect("fake rclone path should be utf-8"),
             ],
-        )
-        .expect("download should complete");
+        );
         let downloaded = temp_dir.join("downloads").join("资料/a.txt");
         let temp_downloaded = temp_download_path(&downloaded);
 
-        assert_eq!(messages, vec!["downloaded 资料/a.txt"]);
+        assert_eq!(
+            results,
+            vec![DownloadItemResult {
+                path: "资料/a.txt".to_string(),
+                status: "downloaded".to_string(),
+                message: "downloaded 资料/a.txt".to_string(),
+            }]
+        );
         assert_eq!(
             fs::read(downloaded).expect("downloaded file should exist"),
             b"abc"
@@ -1039,6 +1072,84 @@ mod tests {
             !temp_downloaded.exists(),
             "temporary download file should be moved into place"
         );
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn download_records_reports_failures_without_stopping_the_batch() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-structured-download-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let fake_rclone = temp_dir.join("fake-rclone.ps1");
+        fs::write(
+            &fake_rclone,
+            r#"
+$target = $args[-1]
+if ($target -like "*good.txt") {
+  [Console]::OpenStandardOutput().Write([byte[]](97,98,99), 0, 3)
+  exit 0
+}
+[Console]::Error.Write("missing object")
+exit 1
+"#,
+        )
+        .expect("fake rclone should be written");
+
+        let request = DownloadRequest {
+            index_repo_path: temp_dir.to_string_lossy().into_owned(),
+            paths: vec!["资料/good.txt".to_string(), "资料/bad.txt".to_string()],
+            download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
+            rclone_path: "powershell".to_string(),
+            remote: "ebookneo-r2-readonly".to_string(),
+            bucket: "tyut-ebooks-collection-neo".to_string(),
+            download_jobs: 1,
+        };
+        let records = vec![
+            ManifestRecord {
+                path: "资料/good.txt".to_string(),
+                object_key: "objects/sha256/good.txt".to_string(),
+                sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                    .to_string(),
+                size: 3,
+                storage: "r2".to_string(),
+                updated_at: "2026-06-12".to_string(),
+                visibility: "private".to_string(),
+            },
+            ManifestRecord {
+                path: "资料/bad.txt".to_string(),
+                object_key: "objects/sha256/bad.txt".to_string(),
+                sha256: "a".repeat(64),
+                size: 3,
+                storage: "r2".to_string(),
+                updated_at: "2026-06-12".to_string(),
+                visibility: "private".to_string(),
+            },
+        ];
+
+        let results = download_records_with_prefix_args(
+            &temp_dir,
+            &request,
+            records,
+            &[
+                "-File",
+                fake_rclone
+                    .to_str()
+                    .expect("fake rclone path should be utf-8"),
+            ],
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].path, "资料/good.txt");
+        assert_eq!(results[0].status, "downloaded");
+        assert_eq!(results[1].path, "资料/bad.txt");
+        assert_eq!(results[1].status, "failed");
+        assert!(results[1].message.contains("missing object"));
+
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
     }
 

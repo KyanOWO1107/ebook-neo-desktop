@@ -50,6 +50,19 @@ describe("App", () => {
       if (command === "prepare_download_root") {
         return Promise.resolve("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo/downloads/gui");
       }
+      if (command === "download_selected") {
+        return Promise.resolve({
+          stdout: "Downloaded 0 file(s), 1 failed.",
+          stderr: "",
+          items: [
+            {
+              path: "资料/数据结构/a.pdf",
+              status: "failed",
+              message: "missing object",
+            },
+          ],
+        });
+      }
       return Promise.resolve({ stdout: "", stderr: "" });
     });
     mockedOpenPath().mockResolvedValue(undefined);
@@ -112,5 +125,33 @@ describe("App", () => {
       }),
     );
     expect(mockedOpenPath()).toHaveBeenCalledWith("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo/downloads/gui");
+  });
+
+  it("shows failed download rows and retries only failed paths", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /资料\/数据结构\/a\.pdf/ }));
+    fireEvent.click(screen.getByRole("button", { name: "开始下载" }));
+
+    expect(await screen.findByText("失败")).toBeTruthy();
+    expect(await screen.findByText("missing object")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试失败" }));
+
+    await waitFor(() =>
+      expect(mockedInvoke()).toHaveBeenLastCalledWith("download_selected", {
+        request: {
+          indexRepoPath: defaultAppSettings.indexRepoPath,
+          paths: ["资料/数据结构/a.pdf"],
+          downloadRoot: defaultAppSettings.downloadRoot,
+          rclonePath: defaultAppSettings.rclonePath,
+          remote: defaultAppSettings.remote,
+          bucket: defaultAppSettings.bucket,
+          downloadJobs: defaultAppSettings.downloadJobs,
+        },
+      }),
+    );
   });
 });

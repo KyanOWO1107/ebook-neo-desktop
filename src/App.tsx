@@ -33,6 +33,13 @@ import {
 type DownloadResult = {
   stdout: string;
   stderr: string;
+  items: DownloadItemResult[];
+};
+
+type DownloadItemResult = {
+  path: string;
+  status: "downloaded" | "createdEmpty" | "failed";
+  message: string;
 };
 
 type CommandResult = {
@@ -54,6 +61,7 @@ function App() {
   const [isCheckingRemote, setIsCheckingRemote] = useState(false);
   const [isOpeningDownloadRoot, setIsOpeningDownloadRoot] = useState(false);
   const [downloadLog, setDownloadLog] = useState("等待选择...");
+  const [downloadResults, setDownloadResults] = useState<DownloadItemResult[]>([]);
   const [downloadSettings, setDownloadSettings] = useState<AppSettings>(defaultAppSettings);
 
   async function loadManifest(indexRepoPath = downloadSettings.indexRepoPath) {
@@ -238,19 +246,20 @@ function App() {
     });
   }
 
-  async function downloadSelected() {
-    if (selectedRecords.length === 0 || isDownloading) {
+  async function downloadPaths(paths: string[]) {
+    if (paths.length === 0 || isDownloading) {
       return;
     }
 
     setIsDownloading(true);
-    setStatus(`正在下载 ${selectedRecords.length.toLocaleString()} 个文件...`);
+    setStatus(`正在下载 ${paths.length.toLocaleString()} 个文件...`);
     setDownloadLog(commandPreview);
+    setDownloadResults([]);
     try {
       const result = await invoke<DownloadResult>("download_selected", {
         request: {
           indexRepoPath: downloadSettings.indexRepoPath,
-          paths: selectedRecords.map((record) => record.path),
+          paths,
           downloadRoot: downloadSettings.downloadRoot,
           rclonePath: downloadSettings.rclonePath,
           remote: downloadSettings.remote,
@@ -260,14 +269,28 @@ function App() {
       });
       const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n\n");
       setDownloadLog(output || "下载命令执行完成。");
-      setStatus(`下载完成：${selectedRecords.length.toLocaleString()} 个文件`);
+      setDownloadResults(result.items ?? []);
+      const failures = result.items?.filter((item) => item.status === "failed").length ?? 0;
+      setStatus(failures > 0 ? `下载完成，${failures.toLocaleString()} 个文件失败` : `下载完成：${paths.length.toLocaleString()} 个文件`);
     } catch (error) {
       setDownloadLog(error instanceof Error ? error.message : String(error));
+      setDownloadResults([]);
       setStatus("下载失败");
     } finally {
       setIsDownloading(false);
     }
   }
+
+  async function downloadSelected() {
+    await downloadPaths(selectedRecords.map((record) => record.path));
+  }
+
+  async function retryFailedDownloads() {
+    const failedPaths = downloadResults.filter((item) => item.status === "failed").map((item) => item.path);
+    await downloadPaths(failedPaths);
+  }
+
+  const failedDownloadCount = downloadResults.filter((item) => item.status === "failed").length;
 
   const commandPreview =
     selectedRecords.length === 1
@@ -547,6 +570,31 @@ function App() {
               </button>
             </div>
             <pre className="command-preview">{selectedRecords.length > 0 ? downloadLog : "等待选择..."}</pre>
+            {downloadResults.length > 0 && (
+              <div className="result-list" aria-label="下载结果">
+                {downloadResults.slice(0, 8).map((item) => (
+                  <div className="result-item" data-status={item.status} key={`${item.status}-${item.path}`}>
+                    <span>{item.status === "failed" ? "失败" : item.status === "createdEmpty" ? "空文件" : "完成"}</span>
+                    <strong title={item.path}>{item.path.split("/").pop()}</strong>
+                    <small>{item.message}</small>
+                  </div>
+                ))}
+                {downloadResults.length > 8 && (
+                  <p className="empty-state">另有 {downloadResults.length - 8} 条下载结果。</p>
+                )}
+              </div>
+            )}
+            {failedDownloadCount > 0 && (
+              <button
+                className="secondary-action"
+                type="button"
+                onClick={retryFailedDownloads}
+                disabled={isDownloading}
+              >
+                <RefreshCw size={16} />
+                重试失败
+              </button>
+            )}
             <button
               className="primary-action"
               type="button"

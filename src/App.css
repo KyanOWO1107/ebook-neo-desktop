@@ -520,6 +520,48 @@ button.folder-disclosure:hover {
   white-space: pre-wrap;
 }
 
+.result-list {
+  display: flex;
+  max-height: 190px;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+}
+
+.result-item {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 2px 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.result-item span {
+  grid-row: 1 / 3;
+  align-self: start;
+  color: var(--primary-strong);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.result-item[data-status="failed"] span {
+  color: #c43d3d;
+}
+
+.result-item strong,
+.result-item small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-item small {
+  color: var(--muted);
+}
+
 .primary-action,
 .secondary-action {
   display: flex;
