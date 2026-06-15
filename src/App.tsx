@@ -180,7 +180,6 @@ function App() {
           indexRepoPath: downloadSettings.indexRepoPath,
           paths: selectedRecords.map((record) => record.path),
           downloadRoot: downloadSettings.downloadRoot,
-          pythonCommand: downloadSettings.pythonCommand,
           rclonePath: downloadSettings.rclonePath,
           remote: downloadSettings.remote,
           bucket: downloadSettings.bucket,
@@ -200,11 +199,11 @@ function App() {
 
   const commandPreview =
     selectedRecords.length === 1
-      ? `${downloadSettings.pythonCommand} tools\\fetch_objects.py --manifest manifests\\files.jsonl --download-root ${downloadSettings.downloadRoot} --path '${selectedRecords[0].path}' --execute --transfer-mode cat --jobs ${downloadSettings.downloadJobs}`
-      : `${downloadSettings.pythonCommand} tools\\fetch_objects.py --manifest manifests\\files.jsonl --download-root ${downloadSettings.downloadRoot} ${selectedRecords
+      ? `${downloadSettings.rclonePath} cat ${downloadSettings.remote}:${downloadSettings.bucket}/${selectedRecords[0].objectKey} -> ${downloadSettings.downloadRoot}/${selectedRecords[0].path}`
+      : `${downloadSettings.rclonePath} cat ${downloadSettings.remote}:${downloadSettings.bucket}/<object_key> -> ${downloadSettings.downloadRoot}/<manifest_path> ${selectedRecords
           .slice(0, 3)
-          .map((record) => `--path '${record.path}'`)
-          .join(" ")}${selectedRecords.length > 3 ? " ..." : ""} --execute --transfer-mode cat --jobs ${downloadSettings.downloadJobs}`;
+          .map((record) => `'${record.path}'`)
+          .join(" ")}${selectedRecords.length > 3 ? " ..." : ""} (jobs=${downloadSettings.downloadJobs})`;
 
   return (
     <main className="app-shell" data-theme={themeAttribute(downloadSettings.theme)}>
@@ -391,15 +390,6 @@ function App() {
                   value={downloadSettings.downloadRoot}
                   onChange={(event) =>
                     setDownloadSettings((settings) => ({ ...settings, downloadRoot: event.currentTarget.value }))
-                  }
-                />
-              </label>
-              <label>
-                <span>Python</span>
-                <input
-                  value={downloadSettings.pythonCommand}
-                  onChange={(event) =>
-                    setDownloadSettings((settings) => ({ ...settings, pythonCommand: event.currentTarget.value }))
                   }
                 />
               </label>

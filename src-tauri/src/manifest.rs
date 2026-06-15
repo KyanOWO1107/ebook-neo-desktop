@@ -1,7 +1,12 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Deserialize)]
@@ -15,7 +20,7 @@ struct RawManifestRecord {
     visibility: String,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManifestRecord {
     pub path: String,
@@ -47,8 +52,9 @@ pub fn parse_manifest_jsonl(input: &str) -> Result<Vec<ManifestRecord>, String> 
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
         .map(|(index, line)| {
-            let raw: RawManifestRecord = serde_json::from_str(line)
-                .map_err(|error| format!("Invalid manifest JSON on line {}: {}", index + 1, error))?;
+            let raw: RawManifestRecord = serde_json::from_str(line).map_err(|error| {
+                format!("Invalid manifest JSON on line {}: {}", index + 1, error)
+            })?;
             Ok(ManifestRecord::from(raw))
         })
         .collect()
@@ -65,7 +71,8 @@ fn default_manifest_path(index_repo_path: &str) -> Result<PathBuf, String> {
 }
 
 fn load_manifest_from_path(path: &Path) -> Result<Vec<ManifestRecord>, String> {
-    let contents = fs::read_to_string(path).map_err(|error| format!("Failed to read {}: {}", path.display(), error))?;
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read {}: {}", path.display(), error))?;
     parse_manifest_jsonl(&contents)
 }
 
@@ -81,7 +88,6 @@ pub struct DownloadRequest {
     pub index_repo_path: String,
     pub paths: Vec<String>,
     pub download_root: String,
-    pub python_command: String,
     pub rclone_path: String,
     pub remote: String,
     pub bucket: String,
@@ -101,7 +107,6 @@ pub struct AppSettings {
     #[serde(default = "default_index_repo_path")]
     pub index_repo_path: String,
     pub download_root: String,
-    pub python_command: String,
     pub rclone_path: String,
     pub remote: String,
     pub bucket: String,
@@ -114,7 +119,6 @@ impl Default for AppSettings {
         Self {
             index_repo_path: default_index_repo_path(),
             download_root: "downloads/gui".to_string(),
-            python_command: "python".to_string(),
             rclone_path: "rclone".to_string(),
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
@@ -145,9 +149,6 @@ fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     }
     if settings.download_root.trim().is_empty() {
         return Err("Download directory is required".to_string());
-    }
-    if settings.python_command.trim().is_empty() {
-        return Err("Python command is required".to_string());
     }
     if settings.rclone_path.trim().is_empty() {
         return Err("rclone path is required".to_string());
@@ -182,8 +183,8 @@ fn load_settings_from_path(path: &Path) -> Result<AppSettings, String> {
     if !path.is_file() {
         return Ok(default_settings());
     }
-    let contents =
-        fs::read_to_string(path).map_err(|error| format!("Failed to read {}: {}", path.display(), error))?;
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read {}: {}", path.display(), error))?;
     let settings: AppSettings = serde_json::from_str(&contents)
         .map_err(|error| format!("Invalid settings JSON in {}: {}", path.display(), error))?;
     validate_settings(&settings)?;
@@ -193,10 +194,12 @@ fn load_settings_from_path(path: &Path) -> Result<AppSettings, String> {
 fn save_settings_to_path(path: &Path, settings: &AppSettings) -> Result<(), String> {
     validate_settings(settings)?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("Failed to create {}: {}", parent.display(), error))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {}", parent.display(), error))?;
     }
     let contents = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
-    fs::write(path, contents).map_err(|error| format!("Failed to write {}: {}", path.display(), error))
+    fs::write(path, contents)
+        .map_err(|error| format!("Failed to write {}: {}", path.display(), error))
 }
 
 #[tauri::command]
@@ -227,8 +230,13 @@ fn resolve_index_repo_path(index_repo_path: &str) -> Result<PathBuf, String> {
             .join(configured_path)
     };
 
-    let root = fs::canonicalize(&candidate)
-        .map_err(|error| format!("Failed to resolve index repository path {}: {}", candidate.display(), error))?;
+    let root = fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "Failed to resolve index repository path {}: {}",
+            candidate.display(),
+            error
+        )
+    })?;
 
     if !root.join("manifests/files.jsonl").is_file() {
         return Err(format!(
@@ -237,22 +245,12 @@ fn resolve_index_repo_path(index_repo_path: &str) -> Result<PathBuf, String> {
         ));
     }
 
-    if !root.join("tools/fetch_objects.py").is_file() {
-        return Err(format!(
-            "Index repository path {} is missing tools/fetch_objects.py",
-            root.display()
-        ));
-    }
-
     Ok(root)
 }
 
-fn build_fetch_command_args(request: &DownloadRequest) -> Result<Vec<String>, String> {
+fn validate_download_request(request: &DownloadRequest) -> Result<(), String> {
     if request.paths.is_empty() {
         return Err("Select at least one file before downloading".to_string());
-    }
-    if request.python_command.trim().is_empty() {
-        return Err("Python command is required".to_string());
     }
     if request.rclone_path.trim().is_empty() {
         return Err("rclone path is required".to_string());
@@ -263,34 +261,365 @@ fn build_fetch_command_args(request: &DownloadRequest) -> Result<Vec<String>, St
     if request.download_jobs > 16 {
         return Err("Download jobs must be between 1 and 16".to_string());
     }
-
-    let mut args = vec![
-        "tools/fetch_objects.py".to_string(),
-        "--manifest".to_string(),
-        "manifests/files.jsonl".to_string(),
-        "--download-root".to_string(),
-        request.download_root.clone(),
-        "--remote".to_string(),
-        request.remote.clone(),
-        "--bucket".to_string(),
-        request.bucket.clone(),
-        "--execute".to_string(),
-        "--transfer-mode".to_string(),
-        "cat".to_string(),
-        "--rclone".to_string(),
-        request.rclone_path.clone(),
-        "--jobs".to_string(),
-        request.download_jobs.to_string(),
-    ];
-
-    for path in &request.paths {
-        args.push("--path".to_string());
-        args.push(path.clone());
+    if request.download_root.trim().is_empty() {
+        return Err("Download directory is required".to_string());
     }
-
-    Ok(args)
+    if request.remote.trim().is_empty() {
+        return Err("R2 remote is required".to_string());
+    }
+    if request.bucket.trim().is_empty() {
+        return Err("R2 bucket is required".to_string());
+    }
+    Ok(())
 }
 
+fn build_rclone_cat_args(
+    remote: &str,
+    bucket: &str,
+    record: &ManifestRecord,
+) -> Result<Vec<String>, String> {
+    let remote_name = remote.trim().trim_end_matches(':');
+    let bucket_name = bucket.trim().trim_matches('/');
+    let object_key = record.object_key.trim().trim_start_matches('/');
+
+    if remote_name.is_empty() {
+        return Err("R2 remote is required".to_string());
+    }
+    if bucket_name.is_empty() {
+        return Err("R2 bucket is required".to_string());
+    }
+    if object_key.is_empty() {
+        return Err(format!(
+            "Manifest record has no object key: {}",
+            record.path
+        ));
+    }
+
+    Ok(vec![
+        "cat".to_string(),
+        format!("{remote_name}:{bucket_name}/{object_key}"),
+    ])
+}
+
+fn select_records_by_paths(
+    records: &[ManifestRecord],
+    paths: &[String],
+) -> Result<Vec<ManifestRecord>, String> {
+    let by_path: HashMap<&str, &ManifestRecord> = records
+        .iter()
+        .map(|record| (record.path.as_str(), record))
+        .collect();
+    let mut selected = Vec::with_capacity(paths.len());
+
+    for path in paths {
+        let record = by_path
+            .get(path.as_str())
+            .ok_or_else(|| format!("Selected path is not present in manifest: {path}"))?;
+        selected.push((*record).clone());
+    }
+
+    Ok(selected)
+}
+
+fn resolve_download_root(index_root: &Path, download_root: &str) -> PathBuf {
+    let configured = PathBuf::from(download_root.trim());
+    if configured.is_absolute() {
+        configured
+    } else {
+        index_root.join(configured)
+    }
+}
+
+fn build_destination_path(
+    index_root: &Path,
+    download_root: &str,
+    manifest_path: &str,
+) -> Result<PathBuf, String> {
+    let base = resolve_download_root(index_root, download_root);
+    let mut destination = base;
+
+    for component in Path::new(manifest_path).components() {
+        match component {
+            std::path::Component::Normal(part) => destination.push(part),
+            _ => {
+                return Err(format!(
+                    "Manifest path must stay inside the download directory: {manifest_path}"
+                ));
+            }
+        }
+    }
+
+    Ok(destination)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn verify_downloaded_file(
+    path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Failed to stat {}: {}", path.display(), error))?;
+    if metadata.len() != expected_size {
+        return Err(format!(
+            "Size mismatch for {}: expected {} bytes, got {} bytes",
+            path.display(),
+            expected_size,
+            metadata.len()
+        ));
+    }
+
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("Failed to open {}: {}", path.display(), error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Failed to read {}: {}", path.display(), error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    let actual = hex_sha256(&hasher.finalize());
+    if actual != expected_sha256.to_ascii_lowercase() {
+        return Err(format!(
+            "SHA256 mismatch for {}: expected {}, got {}",
+            path.display(),
+            expected_sha256,
+            actual
+        ));
+    }
+
+    Ok(())
+}
+
+fn temp_download_path(destination: &Path) -> PathBuf {
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
+    destination.with_file_name(format!("{file_name}.ebook-neo-part"))
+}
+
+fn install_verified_download(temp_path: &Path, destination: &Path) -> Result<(), String> {
+    if destination.is_file() {
+        fs::remove_file(destination)
+            .map_err(|error| format!("Failed to replace {}: {}", destination.display(), error))?;
+    }
+    fs::rename(temp_path, destination).map_err(|error| {
+        format!(
+            "Failed to move {} to {}: {}",
+            temp_path.display(),
+            destination.display(),
+            error
+        )
+    })
+}
+
+fn read_pipe_to_string<R>(mut reader: R) -> String
+where
+    R: Read,
+{
+    let mut bytes = Vec::new();
+    match reader.read_to_end(&mut bytes) {
+        Ok(_) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => format!("Failed to read process output: {error}"),
+    }
+}
+
+fn download_manifest_record_with_prefix_args(
+    index_root: &Path,
+    request: &DownloadRequest,
+    record: &ManifestRecord,
+    prefix_args: &[&str],
+) -> Result<String, String> {
+    let destination = build_destination_path(index_root, &request.download_root, &record.path)?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {}", parent.display(), error))?;
+    }
+
+    if record.size == 0 {
+        fs::write(&destination, [])
+            .map_err(|error| format!("Failed to write {}: {}", destination.display(), error))?;
+        verify_downloaded_file(&destination, record.size, &record.sha256)?;
+        return Ok(format!("created empty file {}", record.path));
+    }
+
+    let args = build_rclone_cat_args(&request.remote, &request.bucket, record)?;
+    let temp_path = temp_download_path(&destination);
+    if temp_path.is_file() {
+        fs::remove_file(&temp_path).map_err(|error| {
+            format!(
+                "Failed to remove stale temp file {}: {}",
+                temp_path.display(),
+                error
+            )
+        })?;
+    }
+
+    let mut child = Command::new(&request.rclone_path)
+        .args(prefix_args)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start rclone for {}: {}", record.path, error))?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("Failed to capture rclone stdout for {}", record.path))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("Failed to capture rclone stderr for {}", record.path))?;
+
+    let stderr_thread = thread::spawn(move || read_pipe_to_string(stderr));
+    let mut temp_file = fs::File::create(&temp_path)
+        .map_err(|error| format!("Failed to create {}: {}", temp_path.display(), error))?;
+    if let Err(error) = std::io::copy(&mut stdout, &mut temp_file) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let stderr_text = stderr_thread
+            .join()
+            .unwrap_or_else(|_| "Failed to join rclone stderr reader".to_string());
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "Failed to stream rclone output to {}: {}\n{}",
+            temp_path.display(),
+            error,
+            stderr_text
+        ));
+    }
+    temp_file
+        .flush()
+        .map_err(|error| format!("Failed to flush {}: {}", temp_path.display(), error))?;
+    drop(temp_file);
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Failed to wait for rclone for {}: {}", record.path, error))?;
+    let stderr_text = stderr_thread
+        .join()
+        .unwrap_or_else(|_| "Failed to join rclone stderr reader".to_string());
+
+    if !status.success() {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "rclone cat failed for {} with status {}.\n{}",
+            record.path, status, stderr_text
+        ));
+    }
+
+    verify_downloaded_file(&temp_path, record.size, &record.sha256)?;
+    install_verified_download(&temp_path, &destination)?;
+
+    Ok(format!("downloaded {}", record.path))
+}
+
+fn download_records(
+    index_root: &Path,
+    request: &DownloadRequest,
+    records: Vec<ManifestRecord>,
+) -> Result<Vec<String>, String> {
+    download_records_with_prefix_args(index_root, request, records, &[])
+}
+
+fn download_records_with_prefix_args(
+    index_root: &Path,
+    request: &DownloadRequest,
+    records: Vec<ManifestRecord>,
+    prefix_args: &[&str],
+) -> Result<Vec<String>, String> {
+    let mut deduped = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for record in records {
+        if seen.insert(record.path.clone()) {
+            deduped.push(record);
+        }
+    }
+
+    if request.download_jobs == 1 || deduped.len() <= 1 {
+        return deduped
+            .iter()
+            .map(|record| {
+                download_manifest_record_with_prefix_args(index_root, request, record, prefix_args)
+            })
+            .collect();
+    }
+
+    let queue = Arc::new(Mutex::new(VecDeque::from(deduped)));
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let first_error = Arc::new(Mutex::new(None::<String>));
+    let worker_count = usize::min(request.download_jobs as usize, request.paths.len());
+
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let queue = Arc::clone(&queue);
+            let messages = Arc::clone(&messages);
+            let first_error = Arc::clone(&first_error);
+
+            scope.spawn(move || loop {
+                if first_error
+                    .lock()
+                    .expect("error lock should not be poisoned")
+                    .is_some()
+                {
+                    return;
+                }
+
+                let record = {
+                    let mut queue = queue.lock().expect("queue lock should not be poisoned");
+                    queue.pop_front()
+                };
+
+                let Some(record) = record else {
+                    return;
+                };
+
+                match download_manifest_record_with_prefix_args(
+                    index_root,
+                    request,
+                    &record,
+                    prefix_args,
+                ) {
+                    Ok(message) => messages
+                        .lock()
+                        .expect("message lock should not be poisoned")
+                        .push(message),
+                    Err(error) => {
+                        *first_error
+                            .lock()
+                            .expect("error lock should not be poisoned") = Some(error);
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    if let Some(error) = first_error
+        .lock()
+        .expect("error lock should not be poisoned")
+        .clone()
+    {
+        return Err(error);
+    }
+
+    let collected_messages = messages
+        .lock()
+        .expect("message lock should not be poisoned")
+        .clone();
+    Ok(collected_messages)
+}
 fn git_update_command_args() -> Vec<&'static str> {
     vec!["pull", "--ff-only"]
 }
@@ -322,26 +651,20 @@ pub fn update_manifest_from_git(index_repo_path: String) -> Result<CommandResult
 #[tauri::command]
 pub fn download_selected(request: DownloadRequest) -> Result<DownloadResult, String> {
     let root = resolve_index_repo_path(&request.index_repo_path)?;
-    let args = build_fetch_command_args(&request)?;
-    let output = Command::new(&request.python_command)
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|error| format!("Failed to start download command: {}", error))?;
+    validate_download_request(&request)?;
+    let manifest_path = root.join("manifests/files.jsonl");
+    let records = load_manifest_from_path(&manifest_path)?;
+    let selected = select_records_by_paths(&records, &request.paths)?;
+    let messages = download_records(&root, &request, selected)?;
 
-    let result = DownloadResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    };
-
-    if output.status.success() {
-        Ok(result)
-    } else {
-        Err(format!(
-            "Download command failed with status {}.\n{}\n{}",
-            output.status, result.stdout, result.stderr
-        ))
-    }
+    Ok(DownloadResult {
+        stdout: format!(
+            "Downloaded {} file(s) with rclone cat.\n{}",
+            messages.len(),
+            messages.join("\n")
+        ),
+        stderr: String::new(),
+    })
 }
 
 #[cfg(test)]
@@ -363,45 +686,204 @@ mod tests {
     }
 
     #[test]
-    fn builds_fetch_command_args_for_selected_paths() {
+    fn builds_rclone_cat_args_for_a_manifest_record() {
+        let record = ManifestRecord {
+            path: "资料/a.pdf".to_string(),
+            object_key: "objects/sha256/aa/a.pdf".to_string(),
+            sha256: "a".repeat(64),
+            size: 123,
+            storage: "r2".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "private".to_string(),
+        };
+
+        let args = build_rclone_cat_args(
+            "ebookneo-r2-readonly",
+            "tyut-ebooks-collection-neo",
+            &record,
+        )
+        .expect("rclone cat args should build");
+
+        assert_eq!(
+            args,
+            vec![
+                "cat".to_string(),
+                "ebookneo-r2-readonly:tyut-ebooks-collection-neo/objects/sha256/aa/a.pdf"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn selects_manifest_records_by_requested_paths() {
+        let records = vec![
+            ManifestRecord {
+                path: "资料/a.pdf".to_string(),
+                object_key: "objects/sha256/aa/a.pdf".to_string(),
+                sha256: "a".repeat(64),
+                size: 123,
+                storage: "r2".to_string(),
+                updated_at: "2026-06-12".to_string(),
+                visibility: "private".to_string(),
+            },
+            ManifestRecord {
+                path: "课件/b.pptx".to_string(),
+                object_key: "objects/sha256/bb/b.pptx".to_string(),
+                sha256: "b".repeat(64),
+                size: 456,
+                storage: "r2".to_string(),
+                updated_at: "2026-06-12".to_string(),
+                visibility: "private".to_string(),
+            },
+        ];
+
+        let selected = select_records_by_paths(&records, &["课件/b.pptx".to_string()])
+            .expect("selection should find requested record");
+
+        assert_eq!(selected, vec![records[1].clone()]);
+    }
+
+    #[test]
+    fn rejects_missing_selected_manifest_path() {
+        let records = vec![ManifestRecord {
+            path: "资料/a.pdf".to_string(),
+            object_key: "objects/sha256/aa/a.pdf".to_string(),
+            sha256: "a".repeat(64),
+            size: 123,
+            storage: "r2".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "private".to_string(),
+        }];
+
+        let error = select_records_by_paths(&records, &["资料/missing.pdf".to_string()])
+            .expect_err("missing selection should fail");
+
+        assert_eq!(
+            error,
+            "Selected path is not present in manifest: 资料/missing.pdf"
+        );
+    }
+
+    #[test]
+    fn builds_safe_destination_paths_under_download_root() {
+        let root = PathBuf::from("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo");
+        let path = build_destination_path(&root, "downloads/gui", "资料/数据结构/a.pdf")
+            .expect("destination should be safe");
+
+        assert_eq!(
+            path,
+            PathBuf::from("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo")
+                .join("downloads/gui")
+                .join("资料/数据结构/a.pdf")
+        );
+    }
+
+    #[test]
+    fn rejects_manifest_paths_that_escape_download_root() {
+        let root = PathBuf::from("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo");
+        let error = build_destination_path(&root, "downloads/gui", "../secret.pdf")
+            .expect_err("parent traversal should fail");
+
+        assert_eq!(
+            error,
+            "Manifest path must stay inside the download directory: ../secret.pdf"
+        );
+    }
+
+    #[test]
+    fn verifies_downloaded_file_size_and_sha256() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-verify-download-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let file_path = temp_dir.join("abc.txt");
+        fs::write(&file_path, b"abc").expect("test file should be written");
+
+        verify_downloaded_file(
+            &file_path,
+            3,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        )
+        .expect("file should verify");
+
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn download_records_streams_rclone_output_and_verifies_file() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-direct-download-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let fake_rclone = temp_dir.join("fake-rclone.ps1");
+        fs::write(
+            &fake_rclone,
+            "[Console]::OpenStandardOutput().Write([byte[]](97,98,99), 0, 3)\r\n",
+        )
+        .expect("fake rclone should be written");
+
+        let request = DownloadRequest {
+            index_repo_path: temp_dir.to_string_lossy().into_owned(),
+            paths: vec!["资料/a.txt".to_string()],
+            download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
+            rclone_path: "powershell".to_string(),
+            remote: "ebookneo-r2-readonly".to_string(),
+            bucket: "tyut-ebooks-collection-neo".to_string(),
+            download_jobs: 1,
+        };
+        let record = ManifestRecord {
+            path: "资料/a.txt".to_string(),
+            object_key: "objects/sha256/ba/a.txt".to_string(),
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(),
+            size: 3,
+            storage: "r2".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "private".to_string(),
+        };
+
+        let messages = download_records_with_prefix_args(
+            &temp_dir,
+            &request,
+            vec![record],
+            &[
+                "-File",
+                fake_rclone
+                    .to_str()
+                    .expect("fake rclone path should be utf-8"),
+            ],
+        )
+        .expect("download should complete");
+        let downloaded = temp_dir.join("downloads").join("资料/a.txt");
+
+        assert_eq!(messages, vec!["downloaded 资料/a.txt"]);
+        assert_eq!(
+            fs::read(downloaded).expect("downloaded file should exist"),
+            b"abc"
+        );
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn download_request_validation_does_not_require_python() {
         let request = DownloadRequest {
             index_repo_path: "../TYUT-ebooks-collection-neo".to_string(),
             paths: vec!["资料/a.pdf".to_string(), "课件/b.pptx".to_string()],
             download_root: "downloads/gui".to_string(),
-            python_command: "python".to_string(),
             rclone_path: "rclone".to_string(),
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 4,
         };
 
-        let args = build_fetch_command_args(&request).expect("args should build");
-
-        assert_eq!(
-            args,
-            vec![
-                "tools/fetch_objects.py",
-                "--manifest",
-                "manifests/files.jsonl",
-                "--download-root",
-                "downloads/gui",
-                "--remote",
-                "ebookneo-r2-readonly",
-                "--bucket",
-                "tyut-ebooks-collection-neo",
-                "--execute",
-                "--transfer-mode",
-                "cat",
-                "--rclone",
-                "rclone",
-                "--jobs",
-                "4",
-                "--path",
-                "资料/a.pdf",
-                "--path",
-                "课件/b.pptx",
-            ]
-        );
+        validate_download_request(&request).expect("download request should validate");
     }
 
     #[test]
@@ -410,14 +892,13 @@ mod tests {
             index_repo_path: "../TYUT-ebooks-collection-neo".to_string(),
             paths: Vec::new(),
             download_root: "downloads/gui".to_string(),
-            python_command: "python".to_string(),
             rclone_path: "rclone".to_string(),
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 4,
         };
 
-        let error = build_fetch_command_args(&request).expect_err("empty selection should fail");
+        let error = validate_download_request(&request).expect_err("empty selection should fail");
 
         assert_eq!(error, "Select at least one file before downloading");
     }
@@ -428,14 +909,13 @@ mod tests {
             index_repo_path: "../TYUT-ebooks-collection-neo".to_string(),
             paths: vec!["资料/a.pdf".to_string()],
             download_root: "downloads/gui".to_string(),
-            python_command: "python".to_string(),
             rclone_path: "rclone".to_string(),
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 17,
         };
 
-        let error = build_fetch_command_args(&request).expect_err("too many jobs should fail");
+        let error = validate_download_request(&request).expect_err("too many jobs should fail");
 
         assert_eq!(error, "Download jobs must be between 1 and 16");
     }
@@ -446,7 +926,6 @@ mod tests {
 
         assert_eq!(settings.index_repo_path, "../TYUT-ebooks-collection-neo");
         assert_eq!(settings.download_root, "downloads/gui");
-        assert_eq!(settings.python_command, "python");
         assert_eq!(settings.rclone_path, "rclone");
         assert_eq!(settings.remote, "ebookneo-r2-readonly");
         assert_eq!(settings.bucket, "tyut-ebooks-collection-neo");
@@ -468,7 +947,6 @@ mod tests {
         let settings = AppSettings {
             index_repo_path: "E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo".to_string(),
             download_root: "E:/Downloads/TYUT".to_string(),
-            python_command: "python3".to_string(),
             rclone_path: "E:/Tools/rclone.exe".to_string(),
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
@@ -513,14 +991,13 @@ mod tests {
                 .expect("time should be valid")
                 .as_nanos()
         ));
-        fs::create_dir_all(temp_dir.join("tools")).expect("tools dir should be created");
         fs::create_dir_all(temp_dir.join("manifests")).expect("manifests dir should be created");
-        fs::write(temp_dir.join("tools/fetch_objects.py"), "").expect("fetch tool should be created");
         fs::write(temp_dir.join("manifests/files.jsonl"), "").expect("manifest should be created");
 
         let expected = fs::canonicalize(&temp_dir).expect("temp path should canonicalize");
-        let resolved = resolve_index_repo_path(temp_dir.to_str().expect("temp path should be utf-8"))
-            .expect("index repo path should resolve");
+        let resolved =
+            resolve_index_repo_path(temp_dir.to_str().expect("temp path should be utf-8"))
+                .expect("index repo path should resolve");
 
         assert_eq!(resolved, expected);
         fs::remove_dir_all(&resolved).expect("temp dir should be removed");

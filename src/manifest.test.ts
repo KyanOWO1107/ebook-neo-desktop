@@ -103,6 +103,10 @@ describe("manifest helpers", () => {
     expect(defaultAppSettings.indexRepoPath).toBe("../TYUT-ebooks-collection-neo");
   });
 
+  it("does not include a Python command in app settings", () => {
+    expect(Object.keys(defaultAppSettings)).not.toContain("pythonCommand");
+  });
+
   it("guards theme values for DOM attributes", () => {
     expect(themeAttribute("dark")).toBe("dark");
     expect(themeAttribute("blue")).toBe("light");
