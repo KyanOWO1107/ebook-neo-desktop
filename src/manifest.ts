@@ -36,6 +36,18 @@ export type AppSettings = {
   theme: ThemeMode;
 };
 
+export type DownloadRequestPayload = {
+  indexRepoPath: string;
+  paths: string[];
+  downloadRoot: string;
+  rclonePath: string;
+  remote: string;
+  bucket: string;
+  downloadJobs: number;
+  largeFileThresholdMiB: number;
+  largeFileStreams: number;
+};
+
 export const defaultAppSettings: AppSettings = {
   indexRepoPath: "../TYUT-ebooks-collection-neo",
   downloadRoot: "downloads/gui",
@@ -47,6 +59,20 @@ export const defaultAppSettings: AppSettings = {
   largeFileStreams: 8,
   theme: "light",
 };
+
+export function buildDownloadRequestPayload(settings: AppSettings, paths: string[]): DownloadRequestPayload {
+  return {
+    indexRepoPath: settings.indexRepoPath,
+    paths,
+    downloadRoot: settings.downloadRoot,
+    rclonePath: settings.rclonePath,
+    remote: settings.remote,
+    bucket: settings.bucket,
+    downloadJobs: settings.downloadJobs,
+    largeFileThresholdMiB: settings.largeFileThresholdMiB,
+    largeFileStreams: settings.largeFileStreams,
+  };
+}
 
 export function themeAttribute(theme: string): ThemeMode {
   return theme === "dark" ? "dark" : "light";

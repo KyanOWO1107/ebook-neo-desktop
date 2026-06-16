@@ -106,6 +106,7 @@ pub struct DownloadRequest {
     pub remote: String,
     pub bucket: String,
     pub download_jobs: u16,
+    #[serde(rename = "largeFileThresholdMiB", alias = "largeFileThresholdMib")]
     pub large_file_threshold_mib: u16,
     pub large_file_streams: u16,
 }
@@ -156,6 +157,7 @@ pub struct AppSettings {
     pub remote: String,
     pub bucket: String,
     pub download_jobs: u16,
+    #[serde(rename = "largeFileThresholdMiB", alias = "largeFileThresholdMib")]
     pub large_file_threshold_mib: u16,
     pub large_file_streams: u16,
     pub theme: String,
@@ -2891,6 +2893,48 @@ esac
         assert_eq!(settings.large_file_threshold_mib, 20);
         assert_eq!(settings.large_file_streams, 8);
         assert_eq!(settings.theme, "light");
+    }
+
+    #[test]
+    fn download_request_accepts_frontend_mib_field_spelling() {
+        let request: DownloadRequest = serde_json::from_value(serde_json::json!({
+            "indexRepoPath": "../TYUT-ebooks-collection-neo",
+            "paths": ["资料/a.pdf"],
+            "downloadRoot": "downloads/gui",
+            "rclonePath": "rclone",
+            "remote": "ebookneo-r2-readonly",
+            "bucket": "tyut-ebooks-collection-neo",
+            "downloadJobs": 4,
+            "largeFileThresholdMiB": 20,
+            "largeFileStreams": 8
+        }))
+        .expect("frontend request spelling should deserialize");
+
+        assert_eq!(request.large_file_threshold_mib, 20);
+        assert_eq!(request.large_file_streams, 8);
+    }
+
+    #[test]
+    fn app_settings_serializes_frontend_mib_field_spelling_and_reads_legacy_mib() {
+        let value = serde_json::to_value(default_settings()).expect("settings should serialize");
+        assert_eq!(
+            value
+                .get("largeFileThresholdMiB")
+                .and_then(|item| item.as_u64()),
+            Some(20),
+        );
+        assert!(value.get("largeFileThresholdMib").is_none());
+
+        let mut legacy_value = value;
+        let legacy_object = legacy_value
+            .as_object_mut()
+            .expect("serialized settings should be an object");
+        legacy_object.remove("largeFileThresholdMiB");
+        legacy_object.insert("largeFileThresholdMib".to_string(), serde_json::json!(32));
+
+        let settings: AppSettings = serde_json::from_value(legacy_value)
+            .expect("legacy settings spelling should deserialize");
+        assert_eq!(settings.large_file_threshold_mib, 32);
     }
 
     #[test]

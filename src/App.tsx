@@ -19,6 +19,7 @@ import "./App.css";
 import {
   defaultAppSettings,
   buildFolderSummaries,
+  buildDownloadRequestPayload,
   buildVisibleFolderSummaries,
   clampDownloadJobs,
   clampLargeFileStreams,
@@ -399,17 +400,7 @@ function App() {
     });
     try {
       const task = await invoke<DownloadTask>("start_download", {
-        request: {
-          indexRepoPath: downloadSettings.indexRepoPath,
-          paths,
-          downloadRoot: downloadSettings.downloadRoot,
-          rclonePath: downloadSettings.rclonePath,
-          remote: downloadSettings.remote,
-          bucket: downloadSettings.bucket,
-          downloadJobs: downloadSettings.downloadJobs,
-          largeFileThresholdMiB: downloadSettings.largeFileThresholdMiB,
-          largeFileStreams: downloadSettings.largeFileStreams,
-        },
+        request: buildDownloadRequestPayload(downloadSettings, paths),
       });
       if (activeDownloadTaskIdRef.current && activeDownloadTaskIdRef.current !== task.taskId) {
         throw new Error(`下载任务事件不匹配：${activeDownloadTaskIdRef.current} != ${task.taskId}`);

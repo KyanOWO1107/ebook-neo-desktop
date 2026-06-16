@@ -8,6 +8,7 @@ import {
   clampLargeFileThresholdMiB,
   filterRecords,
   formatBytes,
+  buildDownloadRequestPayload,
   recordsForFolderSelection,
   mergeAppSettings,
   themeAttribute,
@@ -145,5 +146,16 @@ describe("manifest helpers", () => {
       largeFileThresholdMiB: 1,
       largeFileStreams: 16,
     });
+  });
+
+  it("builds the Tauri download request with the MiB field spelling expected by Rust", () => {
+    const request = buildDownloadRequestPayload(defaultAppSettings, ["资料/数据结构/a.pdf"]);
+
+    expect(request).toMatchObject({
+      paths: ["资料/数据结构/a.pdf"],
+      largeFileThresholdMiB: 20,
+      largeFileStreams: 8,
+    });
+    expect(Object.keys(request)).not.toContain("largeFileThresholdMib");
   });
 });
