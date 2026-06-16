@@ -16,7 +16,7 @@
 - Modify: `src-tauri/src/manifest.rs`
 - Modify: `src-tauri/src/lib.rs`
 
-- [ ] **Step 1: Add failing Rust tests**
+- [x] **Step 1: Add failing Rust tests**
 
 Add tests proving:
 
@@ -54,11 +54,11 @@ cargo test progress_event_payload_tracks_file_and_batch_counts
 
 Expected: fail because `download_progress_event` does not exist yet.
 
-- [ ] **Step 2: Implement event payload structs and helpers**
+- [x] **Step 2: Implement event payload structs and helpers**
 
 Add `DownloadTask`, `DownloadProgressEvent`, `DownloadTaskRegistry`, and helper functions for task ids, event payloads, and cancel flag lookup.
 
-- [ ] **Step 3: Run Rust tests**
+- [x] **Step 3: Run Rust tests**
 
 Run:
 
@@ -68,15 +68,15 @@ cargo test progress_event_payload_tracks_file_and_batch_counts
 
 Expected: pass.
 
-- [ ] **Step 4: Add start/cancel command tests**
+- [x] **Step 4: Add start/cancel command tests**
 
 Add tests proving `start_download` and `cancel_download` are async command futures and that repeated cancel of an unknown task returns a clear error.
 
-- [ ] **Step 5: Wire commands**
+- [x] **Step 5: Wire commands**
 
 Register `start_download` and `cancel_download` in `src-tauri/src/lib.rs`.
 
-- [ ] **Step 6: Commit backend task model**
+- [x] **Step 6: Commit backend task model**
 
 Run:
 
@@ -92,23 +92,23 @@ git commit -m "feat: add download task backend"
 **Files:**
 - Modify: `src-tauri/src/manifest.rs`
 
-- [ ] **Step 1: Add failing streaming progress test**
+- [x] **Step 1: Add failing streaming progress test**
 
 Add a test with fake rclone output `abc` proving the downloader emits at least `started`, `progress`, and `finished` item events, and that the final file verifies.
 
-- [ ] **Step 2: Implement progress-emitting copy loop**
+- [x] **Step 2: Implement progress-emitting copy loop**
 
 Replace the one-shot `std::io::copy` path inside the new task downloader with a chunked loop that writes stdout, flushes the temp file, checks cancellation, and emits byte progress.
 
-- [ ] **Step 3: Add failing cancellation test**
+- [x] **Step 3: Add failing cancellation test**
 
 Add a test using a long-running fake rclone script proving cancellation returns a `canceled` item and removes `.ebook-neo-part`.
 
-- [ ] **Step 4: Implement cancellation**
+- [x] **Step 4: Implement cancellation**
 
 Store one cancel flag per task, check it before starting queued work and inside the stream loop, kill the active child on cancellation, and remove the temp file.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run:
 
@@ -128,27 +128,27 @@ git commit -m "feat: stream download progress"
 - Modify: `src/App.css`
 - Modify: `README.md`
 
-- [ ] **Step 1: Mock and test event subscription**
+- [x] **Step 1: Mock and test event subscription**
 
 Mock `@tauri-apps/api/event.listen` and add a failing test proving the app listens to `download-progress`.
 
-- [ ] **Step 2: Start downloads through the task command**
+- [x] **Step 2: Start downloads through the task command**
 
 Change `downloadPaths` to call `start_download`, store `taskId`, and wait for events rather than waiting for a full `DownloadResult`.
 
-- [ ] **Step 3: Render live progress**
+- [x] **Step 3: Render live progress**
 
 Add compact progress UI in the download panel: overall bar, current file, byte count, completed/failed/canceled counts, and current task message.
 
-- [ ] **Step 4: Add cancel action**
+- [x] **Step 4: Add cancel action**
 
 Add a cancel button while a task is active. It calls `cancel_download` with the current task id.
 
-- [ ] **Step 5: Update README**
+- [x] **Step 5: Update README**
 
 Document that downloads now show live progress and can be canceled; retry still applies to failed files only.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run:
 
@@ -165,7 +165,7 @@ git commit -m "feat: show live download progress"
 - Modify: `.agent/visual/*`
 - Modify: `docs/superpowers/plans/2026-06-16-live-download-progress.md`
 
-- [ ] **Step 1: Run full checks**
+- [x] **Step 1: Run full checks**
 
 Run:
 
@@ -181,15 +181,15 @@ Set-Location ..
 git diff --check
 ```
 
-- [ ] **Step 2: Capture screenshot evidence**
+- [x] **Step 2: Capture screenshot evidence**
 
 Run the Vite UI with a Tauri invoke/listen mock that displays live progress, capture a screenshot, and write a markdown note under `.agent/visual/`.
 
-- [ ] **Step 3: Update plan checkboxes**
+- [x] **Step 3: Update plan checkboxes**
 
 Mark completed steps in this plan.
 
-- [ ] **Step 4: Commit final evidence**
+- [x] **Step 4: Commit final evidence**
 
 Run:
 
