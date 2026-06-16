@@ -39,6 +39,14 @@ type DownloadItemResult = {
   message: string;
 };
 
+type DownloadQueueItem = {
+  path: string;
+  status: "queued" | "downloading" | "downloaded" | "createdEmpty" | "failed" | "canceled";
+  message: string;
+  bytesWritten: number;
+  totalBytes: number;
+};
+
 type DownloadTask = {
   taskId: string;
 };
@@ -75,9 +83,11 @@ function App() {
   const [isOpeningDownloadRoot, setIsOpeningDownloadRoot] = useState(false);
   const [downloadLog, setDownloadLog] = useState("等待选择...");
   const [downloadResults, setDownloadResults] = useState<DownloadItemResult[]>([]);
+  const [downloadQueue, setDownloadQueue] = useState<DownloadQueueItem[]>([]);
   const [activeDownloadTaskId, setActiveDownloadTaskId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgressEvent | null>(null);
   const [downloadSettings, setDownloadSettings] = useState<AppSettings>(defaultAppSettings);
+  const [activeView, setActiveView] = useState<"resources" | "downloads">("resources");
   const activeDownloadTaskIdRef = useRef<string | null>(null);
   const isAwaitingDownloadTaskRef = useRef(false);
 
@@ -298,13 +308,24 @@ function App() {
 
     setDownloadProgress(event);
     setDownloadLog(event.message);
+    if (event.path) {
+      const status = downloadStatusFromProgress(event);
+      setDownloadQueue((items) =>
+        items.map((item) =>
+          item.path === event.path
+            ? {
+                ...item,
+                status,
+                message: event.message,
+                bytesWritten: event.bytesWritten,
+                totalBytes: event.totalBytes,
+              }
+            : item,
+        ),
+      );
+    }
     if (event.path && ["finished", "failed", "canceled"].includes(event.kind)) {
-      const status =
-        event.kind === "finished"
-          ? event.totalBytes === 0
-            ? "createdEmpty"
-            : "downloaded"
-          : event.kind;
+      const status = downloadStatusFromProgress(event);
       setDownloadResults((items) => [
         ...items.filter((item) => item.path !== event.path),
         {
@@ -328,6 +349,19 @@ function App() {
     }
   }
 
+  function downloadStatusFromProgress(event: DownloadProgressEvent): DownloadQueueItem["status"] {
+    if (event.kind === "started" || event.kind === "progress") {
+      return "downloading";
+    }
+    if (event.kind === "finished") {
+      return event.totalBytes === 0 ? "createdEmpty" : "downloaded";
+    }
+    if (event.kind === "failed" || event.kind === "canceled") {
+      return event.kind;
+    }
+    return "queued";
+  }
+
   async function downloadPaths(paths: string[]) {
     if (paths.length === 0 || isDownloading) {
       return;
@@ -340,6 +374,18 @@ function App() {
     setStatus(`正在下载 ${paths.length.toLocaleString()} 个文件...`);
     setDownloadLog(commandPreview);
     setDownloadResults([]);
+    setDownloadQueue(
+      paths.map((path) => {
+        const record = records.find((item) => item.path === path);
+        return {
+          path,
+          status: "queued",
+          message: `queued ${path}`,
+          bytesWritten: 0,
+          totalBytes: record?.size ?? 0,
+        };
+      }),
+    );
     setDownloadProgress({
       taskId: "",
       kind: "queued",
@@ -500,6 +546,22 @@ function App() {
               placeholder="搜索路径、文件名或扩展名"
             />
           </div>
+          <div className="view-tabs" aria-label="主视图">
+            <button
+              type="button"
+              data-active={activeView === "resources"}
+              onClick={() => setActiveView("resources")}
+            >
+              资料
+            </button>
+            <button
+              type="button"
+              data-active={activeView === "downloads"}
+              onClick={() => setActiveView("downloads")}
+            >
+              下载
+            </button>
+          </div>
           <button
             className="text-button"
             type="button"
@@ -544,48 +606,97 @@ function App() {
         </section>
 
         <section className="content-grid">
-          <div className="table-panel">
-            <div className="panel-head">
-              <div>
-                <h2>{activeFolder ?? "全部资料"}</h2>
-                <p>{status}</p>
+          {activeView === "resources" ? (
+            <div className="table-panel">
+              <div className="panel-head">
+                <div>
+                  <h2>{activeFolder ?? "全部资料"}</h2>
+                  <p>{status}</p>
+                </div>
+                <div className="selection-actions">
+                  <button type="button" onClick={selectVisible} disabled={visibleRecords.length === 0}>
+                    选中当前列表
+                  </button>
+                  <button type="button" onClick={selectActiveFolder} disabled={!activeFolder}>
+                    选中当前目录
+                  </button>
+                  <button type="button" onClick={clearSelection} disabled={selectedPaths.size === 0}>
+                    清空
+                  </button>
+                </div>
               </div>
-              <div className="selection-actions">
-                <button type="button" onClick={selectVisible} disabled={visibleRecords.length === 0}>
-                  选中当前列表
-                </button>
-                <button type="button" onClick={selectActiveFolder} disabled={!activeFolder}>
-                  选中当前目录
-                </button>
-                <button type="button" onClick={clearSelection} disabled={selectedPaths.size === 0}>
-                  清空
-                </button>
-              </div>
-            </div>
 
-            <div className="resource-table" role="table" aria-label="资料列表">
-              <div className="resource-row header" role="row">
-                <span></span>
-                <span>路径</span>
-                <span>大小</span>
-                <span>更新</span>
+              <div className="resource-table" role="table" aria-label="资料列表">
+                <div className="resource-row header" role="row">
+                  <span></span>
+                  <span>路径</span>
+                  <span>大小</span>
+                  <span>更新</span>
+                </div>
+                {visibleRecords.map((record) => (
+                  <label className="resource-row" key={record.path} role="row">
+                    <input
+                      type="checkbox"
+                      checked={selectedPaths.has(record.path)}
+                      onChange={() => togglePath(record.path)}
+                    />
+                    <span className="path-cell" title={record.path}>
+                      {record.path}
+                    </span>
+                    <span>{formatBytes(record.size)}</span>
+                    <span>{record.updatedAt}</span>
+                  </label>
+                ))}
               </div>
-              {visibleRecords.map((record) => (
-                <label className="resource-row" key={record.path} role="row">
-                  <input
-                    type="checkbox"
-                    checked={selectedPaths.has(record.path)}
-                    onChange={() => togglePath(record.path)}
-                  />
-                  <span className="path-cell" title={record.path}>
-                    {record.path}
-                  </span>
-                  <span>{formatBytes(record.size)}</span>
-                  <span>{record.updatedAt}</span>
-                </label>
-              ))}
             </div>
-          </div>
+          ) : (
+            <div className="table-panel downloads-view">
+              <div className="panel-head">
+                <div>
+                  <h2>下载</h2>
+                  <p>
+                    {downloadQueue.length > 0
+                      ? `${totalProgressCount.toLocaleString()} / ${totalProgressFiles.toLocaleString()}`
+                      : "暂无下载任务"}
+                  </p>
+                </div>
+                <div className="selection-actions">
+                  <button type="button" onClick={retryFailedDownloads} disabled={failedDownloadCount === 0 || isDownloading}>
+                    重试失败
+                  </button>
+                  <button type="button" onClick={openDownloadRoot} disabled={isOpeningDownloadRoot}>
+                    打开目录
+                  </button>
+                </div>
+              </div>
+
+              <div className="download-task-list" aria-label="下载任务列表">
+                {downloadQueue.length === 0 && <p className="empty-state">开始下载后会在这里显示完整任务队列。</p>}
+                {downloadQueue.map((item) => (
+                  <div className="download-task-row" data-status={item.status} key={item.path}>
+                    <span className="task-status">
+                      {item.status === "failed"
+                        ? "失败"
+                        : item.status === "createdEmpty"
+                          ? "空文件"
+                          : item.status === "canceled"
+                            ? "取消"
+                            : item.status === "downloaded"
+                              ? "完成"
+                              : item.status === "downloading"
+                                ? "下载中"
+                                : "排队"}
+                    </span>
+                    <strong title={item.path}>{item.path}</strong>
+                    <small>
+                      {item.totalBytes > 0 ? `${formatBytes(item.bytesWritten)} / ${formatBytes(item.totalBytes)}` : "等待进度"}
+                    </small>
+                    <small title={item.message}>{item.message}</small>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <aside className="download-panel" aria-label="下载队列">
             <div className="panel-head compact">
@@ -752,39 +863,6 @@ function App() {
                   {downloadProgress.failedFiles.toLocaleString()} · 取消 {canceledDownloadCount.toLocaleString()}
                 </small>
               </div>
-            )}
-            {downloadResults.length > 0 && (
-              <div className="result-list" aria-label="下载结果">
-                {downloadResults.slice(0, 8).map((item) => (
-                  <div className="result-item" data-status={item.status} key={`${item.status}-${item.path ?? "task"}`}>
-                    <span>
-                      {item.status === "failed"
-                        ? "失败"
-                        : item.status === "createdEmpty"
-                          ? "空文件"
-                          : item.status === "canceled"
-                            ? "取消"
-                            : "完成"}
-                    </span>
-                    <strong title={item.path ?? undefined}>{item.path?.split("/").pop() ?? "下载任务"}</strong>
-                    <small>{item.message}</small>
-                  </div>
-                ))}
-                {downloadResults.length > 8 && (
-                  <p className="empty-state">另有 {downloadResults.length - 8} 条下载结果。</p>
-                )}
-              </div>
-            )}
-            {failedDownloadCount > 0 && (
-              <button
-                className="secondary-action"
-                type="button"
-                onClick={retryFailedDownloads}
-                disabled={isDownloading}
-              >
-                <RefreshCw size={16} />
-                重试失败
-              </button>
             )}
             {activeDownloadTaskId && (
               <button

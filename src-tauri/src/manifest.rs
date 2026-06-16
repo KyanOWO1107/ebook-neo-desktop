@@ -1329,6 +1329,19 @@ fn download_records_with_progress(
         total_files,
         &format!("queued {} file(s)", total_files),
     ));
+    for record in &deduped {
+        progress_sink.emit(download_progress_event(
+            task_id,
+            "queued",
+            Some(&record.path),
+            0,
+            record.size,
+            0,
+            0,
+            total_files,
+            &format!("queued {}", record.path),
+        ));
+    }
 
     if request.download_jobs == 1 || deduped.len() <= 1 {
         let mut completed_files = 0_usize;
@@ -2471,6 +2484,53 @@ esac
         assert_eq!(canceled_events.len(), 2);
         assert_eq!(canceled_events[0].path.as_deref(), Some("资料/a.txt"));
         assert_eq!(canceled_events[1].path.as_deref(), Some("资料/b.txt"));
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn download_records_emits_queued_events_for_each_selected_file() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-queued-events-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let request = DownloadRequest {
+            index_repo_path: temp_dir.to_string_lossy().into_owned(),
+            paths: vec!["资料/a.txt".to_string(), "资料/b.txt".to_string()],
+            download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
+            rclone_path: "rclone".to_string(),
+            remote: "ebookneo-r2-readonly".to_string(),
+            bucket: "tyut-ebooks-collection-neo".to_string(),
+            download_jobs: 1,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
+        };
+        let sink = RecordingProgressSink::default();
+        let cancel_flag = AtomicBool::new(true);
+
+        let _results = download_records_with_progress(
+            &temp_dir,
+            &request,
+            vec![
+                test_manifest_record("资料/a.txt", "a.txt"),
+                test_manifest_record("资料/b.txt", "b.txt"),
+            ],
+            &[],
+            "task-queued",
+            &sink,
+            &cancel_flag,
+        );
+        let queued_paths = sink
+            .events()
+            .iter()
+            .filter(|event| event.kind == "queued")
+            .filter_map(|event| event.path.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(queued_paths, vec!["资料/a.txt", "资料/b.txt"]);
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
     }
 

@@ -25,6 +25,15 @@ const records: ManifestRecord[] = [
     updatedAt: "2026-06-12",
     visibility: "private",
   },
+  {
+    path: "资料/数据结构/b.pdf",
+    objectKey: "objects/sha256/bb/b.pdf",
+    sha256: "b".repeat(64),
+    size: 2048,
+    storage: "r2",
+    updatedAt: "2026-06-12",
+    visibility: "private",
+  },
 ];
 
 function mockedInvoke() {
@@ -195,6 +204,8 @@ describe("App", () => {
       message: "download task completed: 0 complete, 1 failed",
     });
 
+    fireEvent.click(screen.getByRole("button", { name: "下载" }));
+
     expect(await screen.findByText("失败")).toBeTruthy();
     expect(await screen.findByText("missing object")).toBeTruthy();
 
@@ -284,5 +295,45 @@ describe("App", () => {
     expect(await screen.findByText("512 B / 1.000 KiB")).toBeTruthy();
 
     startDownload.resolve({ taskId: "download-1" });
+  });
+
+  it("keeps a stable multi-file queue on the downloads view while resources show summary progress", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "选中当前列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始下载" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "取消下载" })).toBeTruthy());
+
+    expect(await screen.findByText("0 / 2")).toBeTruthy();
+    expect(screen.queryByText("queued 资料/数据结构/a.pdf")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "下载" }));
+
+    const queue = await screen.findByLabelText("下载任务列表");
+    expect(queue.textContent).toContain("资料/数据结构/a.pdf");
+    expect(queue.textContent).toContain("资料/数据结构/b.pdf");
+    expect((queue.textContent ?? "").indexOf("资料/数据结构/a.pdf")).toBeLessThan(
+      (queue.textContent ?? "").indexOf("资料/数据结构/b.pdf"),
+    );
+
+    emitDownloadProgress({
+      taskId: "download-1",
+      kind: "finished",
+      path: "资料/数据结构/b.pdf",
+      bytesWritten: 2048,
+      totalBytes: 2048,
+      completedFiles: 1,
+      failedFiles: 0,
+      totalFiles: 2,
+      message: "downloaded 资料/数据结构/b.pdf",
+    });
+
+    await waitFor(() => expect(queue.textContent).toContain("完成"));
+    expect((queue.textContent ?? "").indexOf("资料/数据结构/a.pdf")).toBeLessThan(
+      (queue.textContent ?? "").indexOf("资料/数据结构/b.pdf"),
+    );
+    expect(queue.textContent).toContain("downloaded 资料/数据结构/b.pdf");
   });
 });
