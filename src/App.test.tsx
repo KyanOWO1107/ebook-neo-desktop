@@ -94,6 +94,8 @@ describe("App", () => {
 
     const downloadRoot = screen.getByLabelText("下载目录") as HTMLInputElement;
     const indexRepoPath = screen.getByLabelText("索引仓库") as HTMLInputElement;
+    const largeFileThreshold = screen.getByLabelText("大文件阈值") as HTMLInputElement;
+    const largeFileStreams = screen.getByLabelText("大文件线程") as HTMLInputElement;
 
     fireEvent.change(downloadRoot, { target: { value: "" } });
     expect(downloadRoot.value).toBe("");
@@ -106,6 +108,12 @@ describe("App", () => {
 
     fireEvent.change(indexRepoPath, { target: { value: "E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo" } });
     expect(indexRepoPath.value).toBe("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo");
+
+    fireEvent.change(largeFileThreshold, { target: { value: "32" } });
+    expect(largeFileThreshold.value).toBe("32");
+
+    fireEvent.change(largeFileStreams, { target: { value: "12" } });
+    expect(largeFileStreams.value).toBe("12");
   });
 
   it("checks the configured rclone remote from the download panel", async () => {
@@ -159,6 +167,8 @@ describe("App", () => {
           remote: defaultAppSettings.remote,
           bucket: defaultAppSettings.bucket,
           downloadJobs: defaultAppSettings.downloadJobs,
+          largeFileThresholdMiB: defaultAppSettings.largeFileThresholdMiB,
+          largeFileStreams: defaultAppSettings.largeFileStreams,
         },
       }),
     );
@@ -200,6 +210,8 @@ describe("App", () => {
           remote: defaultAppSettings.remote,
           bucket: defaultAppSettings.bucket,
           downloadJobs: defaultAppSettings.downloadJobs,
+          largeFileThresholdMiB: defaultAppSettings.largeFileThresholdMiB,
+          largeFileStreams: defaultAppSettings.largeFileStreams,
         },
       }),
     );

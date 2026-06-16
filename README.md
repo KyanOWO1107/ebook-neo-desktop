@@ -39,6 +39,8 @@ rclone: rclone
 remote: ebookneo-r2-readonly
 bucket: tyut-ebooks-collection-neo
 jobs: 4
+large file threshold: 20 MiB
+large file streams: 8
 theme: light
 ```
 
@@ -125,18 +127,21 @@ chmod a+x Ebook*.AppImage
 点击“开始下载”后，应用会在“索引仓库”目录执行等价命令：
 
 ```bash
-rclone cat ebookneo-r2-readonly:tyut-ebooks-collection-neo/<object_key> > downloads/gui/<manifest-path>
+rclone cat ebookneo-r2-readonly:tyut-ebooks-collection-neo/<object_key> > downloads/gui/<manifest-path>.ebook-neo-part
+rclone copyto ebookneo-r2-readonly:tyut-ebooks-collection-neo/<object_key> downloads/gui/<manifest-path>.ebook-neo-part --multi-thread-streams 8 --multi-thread-cutoff 1M --multi-thread-chunk-size 16M
 ```
 
-应用会先从 `manifests/files.jsonl` 找到选中文件对应的 `object_key`、`size` 和 `sha256`，再把 `rclone cat` 的输出流式写入临时文件。写完后会校验文件大小和 `sha256`，校验通过才替换到目标路径。
+应用会先从 `manifests/files.jsonl` 找到选中文件对应的 `object_key`、`size` 和 `sha256`。小文件使用 `rclone cat` 流式写入临时文件；达到“大文件阈值”的文件使用 `rclone copyto` 写入同一个临时文件，并启用 rclone 的多线程下载参数。写完后会校验文件大小和 `sha256`，校验通过才替换到目标路径。
 
 再次下载同一文件时，会写入同一个目标路径并重新校验，不会在旁边生成重复副本。
 
 `并发`设置控制 GUI 后端同时下载的文件数量，范围为 1 到 16。默认值是 4，网络或机器压力较大时可以调低到 1 或 2。
 
+`大文件阈值`控制何时从 `cat` 切换为 `copyto` 多线程路径，单位为 MiB，默认值是 20。`大文件线程`控制单个大文件的 rclone 多线程流数量，默认值是 8，范围为 1 到 16。它和文件级 `并发` 是两个不同设置：前者加速单个大文件，后者控制同时下载多少个文件。
+
 下载完成后，右侧面板会显示逐文件结果。单个文件失败不会阻止整批任务继续，失败项会保留在结果列表中，可点击“重试失败”只重试这些路径。
 
-下载过程中，右侧面板会显示当前文件的字节级进度、整体完成数量和取消按钮。取消会停止后续排队文件，并让后端尽量终止当前 `rclone cat` 进程；已经写入但未校验完成的 `.ebook-neo-part` 临时文件会被清理。
+下载过程中，右侧面板会显示当前文件的字节级进度、整体完成数量和取消按钮。`cat` 路径会显示实时字节进度；`copyto` 大文件路径当前显示开始、完成或失败状态。取消会停止后续排队文件，并让后端尽量终止当前 rclone 进程；已经写入但未校验完成的 `.ebook-neo-part` 临时文件会被清理。
 
 “检查 R2”会运行只读的 rclone 列目录检查，用于确认当前 `rclone`、Remote 和 Bucket 设置是否可用。“打开目录”会创建并打开当前下载目录。
 

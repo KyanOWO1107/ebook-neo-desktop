@@ -21,6 +21,8 @@ import {
   buildFolderSummaries,
   buildVisibleFolderSummaries,
   clampDownloadJobs,
+  clampLargeFileStreams,
+  clampLargeFileThresholdMiB,
   filterRecords,
   formatBytes,
   mergeAppSettings,
@@ -359,6 +361,8 @@ function App() {
           remote: downloadSettings.remote,
           bucket: downloadSettings.bucket,
           downloadJobs: downloadSettings.downloadJobs,
+          largeFileThresholdMiB: downloadSettings.largeFileThresholdMiB,
+          largeFileStreams: downloadSettings.largeFileStreams,
         },
       });
       if (activeDownloadTaskIdRef.current && activeDownloadTaskIdRef.current !== task.taskId) {
@@ -420,11 +424,11 @@ function App() {
 
   const commandPreview =
     selectedRecords.length === 1
-      ? `${downloadSettings.rclonePath} cat ${downloadSettings.remote}:${downloadSettings.bucket}/${selectedRecords[0].objectKey} -> ${downloadSettings.downloadRoot}/${selectedRecords[0].path}`
-      : `${downloadSettings.rclonePath} cat ${downloadSettings.remote}:${downloadSettings.bucket}/<object_key> -> ${downloadSettings.downloadRoot}/<manifest_path> ${selectedRecords
+      ? `${downloadSettings.rclonePath} ${selectedRecords[0].size >= downloadSettings.largeFileThresholdMiB * 1024 * 1024 ? "copyto" : "cat"} ${downloadSettings.remote}:${downloadSettings.bucket}/${selectedRecords[0].objectKey} -> ${downloadSettings.downloadRoot}/${selectedRecords[0].path}`
+      : `${downloadSettings.rclonePath} cat/copyto>=${downloadSettings.largeFileThresholdMiB}MiB ${downloadSettings.remote}:${downloadSettings.bucket}/<object_key> -> ${downloadSettings.downloadRoot}/<manifest_path> ${selectedRecords
           .slice(0, 3)
           .map((record) => `'${record.path}'`)
-          .join(" ")}${selectedRecords.length > 3 ? " ..." : ""} (jobs=${downloadSettings.downloadJobs})`;
+          .join(" ")}${selectedRecords.length > 3 ? " ..." : ""} (jobs=${downloadSettings.downloadJobs}, large-streams=${downloadSettings.largeFileStreams})`;
 
   return (
     <main className="app-shell" data-theme={themeAttribute(downloadSettings.theme)}>
@@ -661,6 +665,38 @@ function App() {
                     setDownloadSettings((settings) => ({
                       ...settings,
                       downloadJobs: clampDownloadJobs(value),
+                    }));
+                  }}
+                />
+              </label>
+              <label>
+                <span>大文件阈值</span>
+                <input
+                  min={1}
+                  max={4096}
+                  type="number"
+                  value={downloadSettings.largeFileThresholdMiB}
+                  onChange={(event) => {
+                    const value = Number(event.currentTarget.value);
+                    setDownloadSettings((settings) => ({
+                      ...settings,
+                      largeFileThresholdMiB: clampLargeFileThresholdMiB(value),
+                    }));
+                  }}
+                />
+              </label>
+              <label>
+                <span>大文件线程</span>
+                <input
+                  min={1}
+                  max={16}
+                  type="number"
+                  value={downloadSettings.largeFileStreams}
+                  onChange={(event) => {
+                    const value = Number(event.currentTarget.value);
+                    setDownloadSettings((settings) => ({
+                      ...settings,
+                      largeFileStreams: clampLargeFileStreams(value),
                     }));
                   }}
                 />

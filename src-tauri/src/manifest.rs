@@ -106,6 +106,8 @@ pub struct DownloadRequest {
     pub remote: String,
     pub bucket: String,
     pub download_jobs: u16,
+    pub large_file_threshold_mib: u16,
+    pub large_file_streams: u16,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -154,6 +156,8 @@ pub struct AppSettings {
     pub remote: String,
     pub bucket: String,
     pub download_jobs: u16,
+    pub large_file_threshold_mib: u16,
+    pub large_file_streams: u16,
     pub theme: String,
 }
 
@@ -166,6 +170,8 @@ impl Default for AppSettings {
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 4,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
             theme: "light".to_string(),
         }
     }
@@ -271,6 +277,18 @@ fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     }
     if settings.download_jobs > 16 {
         return Err("Download jobs must be between 1 and 16".to_string());
+    }
+    if settings.large_file_threshold_mib == 0 {
+        return Err("Large file threshold must be at least 1 MiB".to_string());
+    }
+    if settings.large_file_threshold_mib > 4096 {
+        return Err("Large file threshold must be between 1 and 4096 MiB".to_string());
+    }
+    if settings.large_file_streams == 0 {
+        return Err("Large file streams must be at least 1".to_string());
+    }
+    if settings.large_file_streams > 16 {
+        return Err("Large file streams must be between 1 and 16".to_string());
     }
     if settings.theme != "light" && settings.theme != "dark" {
         return Err("Theme must be light or dark".to_string());
@@ -386,6 +404,18 @@ fn validate_download_request(request: &DownloadRequest) -> Result<(), String> {
     }
     if request.download_jobs > 16 {
         return Err("Download jobs must be between 1 and 16".to_string());
+    }
+    if request.large_file_threshold_mib == 0 {
+        return Err("Large file threshold must be at least 1 MiB".to_string());
+    }
+    if request.large_file_threshold_mib > 4096 {
+        return Err("Large file threshold must be between 1 and 4096 MiB".to_string());
+    }
+    if request.large_file_streams == 0 {
+        return Err("Large file streams must be at least 1".to_string());
+    }
+    if request.large_file_streams > 16 {
+        return Err("Large file streams must be between 1 and 16".to_string());
     }
     if request.download_root.trim().is_empty() {
         return Err("Download directory is required".to_string());
@@ -560,6 +590,37 @@ fn build_rclone_lsf_args(remote: &str, bucket: &str) -> Result<Vec<String>, Stri
         format!("{remote_name}:{bucket_name}"),
         "--max-depth".to_string(),
         "1".to_string(),
+    ])
+}
+
+fn build_rclone_copyto_args(
+    remote: &str,
+    bucket: &str,
+    record: &ManifestRecord,
+    temp_path: &Path,
+    streams: u16,
+) -> Result<Vec<OsString>, String> {
+    let remote_name = remote.trim().trim_end_matches(':');
+    let bucket_name = bucket.trim().trim_matches('/');
+    validate_manifest_record(record)?;
+    validate_remote_name(remote)?;
+    validate_bucket_name(bucket)?;
+    if streams == 0 || streams > 16 {
+        return Err("Large file streams must be between 1 and 16".to_string());
+    }
+
+    Ok(vec![
+        OsString::from("copyto"),
+        OsString::from(format!("{remote_name}:{bucket_name}/{}", record.object_key)),
+        temp_path.as_os_str().to_os_string(),
+        OsString::from("--multi-thread-streams"),
+        OsString::from(streams.to_string()),
+        OsString::from("--multi-thread-cutoff"),
+        OsString::from("1M"),
+        OsString::from("--multi-thread-chunk-size"),
+        OsString::from("16M"),
+        OsString::from("--stats"),
+        OsString::from("1s"),
     ])
 }
 
@@ -950,92 +1011,42 @@ fn try_download_manifest_record_with_prefix_args(
         ));
     }
 
-    let args = build_rclone_cat_args(&request.remote, &request.bucket, record)?;
-
-    let mut child = Command::new(&request.rclone_path)
-        .args(prefix_args)
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("Failed to start rclone for {}: {}", record.path, error))?;
-
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| format!("Failed to capture rclone stdout for {}", record.path))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| format!("Failed to capture rclone stderr for {}", record.path))?;
-
-    let stderr_thread = thread::spawn(move || read_pipe_to_string(stderr));
-    let mut temp_file = fs::File::create(&temp_path)
-        .map_err(|error| format!("Failed to create {}: {}", temp_path.display(), error))?;
-    let stream_result = stream_download_output(
-        &mut stdout,
-        &mut temp_file,
-        cancel_flag,
-        progress_sink,
-        task_id,
-        record,
-        completed_files,
-        failed_files,
-        total_files,
-    );
-    if let Err(error) = stream_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        let stderr_text = stderr_thread
-            .join()
-            .unwrap_or_else(|_| "Failed to join rclone stderr reader".to_string());
-        let _ = fs::remove_file(&temp_path);
+    let download_result = if record.size >= large_file_threshold_bytes(request) {
+        run_rclone_copyto_download(
+            request,
+            record,
+            &temp_path,
+            prefix_args,
+            cancel_flag,
+            progress_sink,
+            task_id,
+            completed_files,
+            failed_files,
+            total_files,
+        )
+    } else {
+        run_rclone_cat_download(
+            request,
+            record,
+            &temp_path,
+            prefix_args,
+            cancel_flag,
+            progress_sink,
+            task_id,
+            completed_files,
+            failed_files,
+            total_files,
+        )
+    };
+    if let Err(error) = download_result {
         if error == "Download canceled" {
-            emit_canceled_download_event(
-                progress_sink,
-                task_id,
-                record,
-                completed_files,
-                failed_files,
-                total_files,
-            );
             return Ok(download_item_result(
                 &record.path,
                 "canceled",
                 format!("canceled {}", record.path),
             ));
         }
-        return Err(format!("{}\n{}", error, stderr_text));
-    }
-    temp_file
-        .flush()
-        .map_err(|error| format!("Failed to flush {}: {}", temp_path.display(), error))?;
-    drop(temp_file);
-
-    let status = child
-        .wait()
-        .map_err(|error| format!("Failed to wait for rclone for {}: {}", record.path, error))?;
-    let stderr_text = stderr_thread
-        .join()
-        .unwrap_or_else(|_| "Failed to join rclone stderr reader".to_string());
-
-    if !status.success() {
-        let _ = fs::remove_file(&temp_path);
-        progress_sink.emit(download_progress_event(
-            task_id,
-            "failed",
-            Some(&record.path),
-            0,
-            record.size,
-            completed_files,
-            failed_files + 1,
-            total_files,
-            &format!("failed {}", record.path),
-        ));
-        return Err(format!(
-            "rclone cat failed for {} with status {}.\n{}",
-            record.path, status, stderr_text
-        ));
+        return Err(error);
     }
 
     verify_downloaded_file(&temp_path, record.size, &record.sha256)?;
@@ -1057,6 +1068,199 @@ fn try_download_manifest_record_with_prefix_args(
         "downloaded",
         format!("downloaded {}", record.path),
     ))
+}
+
+fn large_file_threshold_bytes(request: &DownloadRequest) -> u64 {
+    u64::from(request.large_file_threshold_mib) * 1024 * 1024
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_rclone_cat_download(
+    request: &DownloadRequest,
+    record: &ManifestRecord,
+    temp_path: &Path,
+    prefix_args: &[&str],
+    cancel_flag: &AtomicBool,
+    progress_sink: &dyn ProgressSink,
+    task_id: &str,
+    completed_files: usize,
+    failed_files: usize,
+    total_files: usize,
+) -> Result<(), String> {
+    let args = build_rclone_cat_args(&request.remote, &request.bucket, record)?;
+
+    let mut child = Command::new(&request.rclone_path)
+        .args(prefix_args)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start rclone for {}: {}", record.path, error))?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("Failed to capture rclone stdout for {}", record.path))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("Failed to capture rclone stderr for {}", record.path))?;
+
+    let stderr_thread = thread::spawn(move || read_pipe_to_string(stderr));
+    let mut temp_file = fs::File::create(temp_path)
+        .map_err(|error| format!("Failed to create {}: {}", temp_path.display(), error))?;
+    let stream_result = stream_download_output(
+        &mut stdout,
+        &mut temp_file,
+        cancel_flag,
+        progress_sink,
+        task_id,
+        record,
+        completed_files,
+        failed_files,
+        total_files,
+    );
+    if let Err(error) = stream_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        let stderr_text = stderr_thread
+            .join()
+            .unwrap_or_else(|_| "Failed to join rclone stderr reader".to_string());
+        let _ = fs::remove_file(temp_path);
+        if error == "Download canceled" {
+            emit_canceled_download_event(
+                progress_sink,
+                task_id,
+                record,
+                completed_files,
+                failed_files,
+                total_files,
+            );
+            return Err("Download canceled".to_string());
+        }
+        return Err(format!("{}\n{}", error, stderr_text));
+    }
+    temp_file
+        .flush()
+        .map_err(|error| format!("Failed to flush {}: {}", temp_path.display(), error))?;
+    drop(temp_file);
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Failed to wait for rclone for {}: {}", record.path, error))?;
+    let stderr_text = stderr_thread
+        .join()
+        .unwrap_or_else(|_| "Failed to join rclone stderr reader".to_string());
+
+    if !status.success() {
+        let _ = fs::remove_file(temp_path);
+        progress_sink.emit(download_progress_event(
+            task_id,
+            "failed",
+            Some(&record.path),
+            0,
+            record.size,
+            completed_files,
+            failed_files + 1,
+            total_files,
+            &format!("failed {}", record.path),
+        ));
+        return Err(format!(
+            "rclone cat failed for {} with status {}.\n{}",
+            record.path, status, stderr_text
+        ));
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_rclone_copyto_download(
+    request: &DownloadRequest,
+    record: &ManifestRecord,
+    temp_path: &Path,
+    prefix_args: &[&str],
+    cancel_flag: &AtomicBool,
+    progress_sink: &dyn ProgressSink,
+    task_id: &str,
+    completed_files: usize,
+    failed_files: usize,
+    total_files: usize,
+) -> Result<(), String> {
+    let args = build_rclone_copyto_args(
+        &request.remote,
+        &request.bucket,
+        record,
+        temp_path,
+        request.large_file_streams,
+    )?;
+
+    let mut child = Command::new(&request.rclone_path)
+        .args(prefix_args)
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start rclone for {}: {}", record.path, error))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("Failed to capture rclone stderr for {}", record.path))?;
+    let stderr_thread = thread::spawn(move || read_pipe_to_string(stderr));
+
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| format!("Failed to poll rclone for {}: {}", record.path, error))?
+            .is_some()
+        {
+            break;
+        }
+        if cancel_flag.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(temp_path);
+            emit_canceled_download_event(
+                progress_sink,
+                task_id,
+                record,
+                completed_files,
+                failed_files,
+                total_files,
+            );
+            let _ = stderr_thread.join();
+            return Err("Download canceled".to_string());
+        }
+        thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Failed to wait for rclone for {}: {}", record.path, error))?;
+    let stderr_text = stderr_thread
+        .join()
+        .unwrap_or_else(|_| "Failed to join rclone stderr reader".to_string());
+
+    if !status.success() {
+        let _ = fs::remove_file(temp_path);
+        progress_sink.emit(download_progress_event(
+            task_id,
+            "failed",
+            Some(&record.path),
+            0,
+            record.size,
+            completed_files,
+            failed_files + 1,
+            total_files,
+            &format!("failed {}", record.path),
+        ));
+        return Err(format!(
+            "rclone copyto failed for {} with status {}.\n{}",
+            record.path, status, stderr_text
+        ));
+    }
+
+    Ok(())
 }
 
 fn download_records(
@@ -1594,6 +1798,74 @@ exit 1
         )
     }
 
+    #[cfg(windows)]
+    fn write_copyto_fake_rclone(temp_dir: &Path) -> (String, Vec<String>) {
+        let fake_rclone = temp_dir.join("fake-copyto-rclone.ps1");
+        let marker = temp_dir.join("copyto.args");
+        fs::write(
+            &fake_rclone,
+            format!(
+                r#"
+[IO.File]::WriteAllText('{}', ($args -join "`n"), [Text.Encoding]::UTF8)
+$destination = $args[2]
+$chunk = [byte[]]::new(8192)
+for ($i = 0; $i -lt $chunk.Length; $i++) {{ $chunk[$i] = 97 }}
+$stream = [IO.File]::Open($destination, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+try {{
+  for ($i = 0; $i -lt 384; $i++) {{ $stream.Write($chunk, 0, $chunk.Length) }}
+}} finally {{
+  $stream.Dispose()
+}}
+"#,
+                marker
+                    .to_str()
+                    .expect("marker path should be utf-8")
+                    .replace('\'', "''")
+            ),
+        )
+        .expect("fake copyto rclone should be written");
+
+        (
+            "powershell".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                fake_rclone
+                    .to_str()
+                    .expect("fake rclone path should be utf-8")
+                    .to_string(),
+            ],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn write_copyto_fake_rclone(temp_dir: &Path) -> (String, Vec<String>) {
+        let fake_rclone = temp_dir.join("fake-copyto-rclone.sh");
+        let marker = temp_dir.join("copyto.args");
+        fs::write(
+            &fake_rclone,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$@" > '{}'
+python3 - "$3" <<'PY'
+import sys
+with open(sys.argv[1], 'wb') as f:
+    f.write(b'a' * (3 * 1024 * 1024))
+PY
+"#,
+                marker.to_string_lossy()
+            ),
+        )
+        .expect("fake copyto rclone should be written");
+
+        (
+            "sh".to_string(),
+            vec![fake_rclone.to_string_lossy().into_owned()],
+        )
+    }
+
     #[cfg(not(windows))]
     fn write_mixed_result_fake_rclone(temp_dir: &Path) -> (String, Vec<String>) {
         let fake_rclone = temp_dir.join("fake-rclone.sh");
@@ -1689,6 +1961,49 @@ esac
                     "ebookneo-r2-readonly:tyut-ebooks-collection-neo/objects/sha256/aa/aa/{}/a.pdf",
                     "a".repeat(64)
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_rclone_copyto_args_for_large_manifest_record() {
+        let record = ManifestRecord {
+            path: "资料/a.zip".to_string(),
+            object_key: object_key_for_sha(&"a".repeat(64), "a.zip"),
+            sha256: "a".repeat(64),
+            size: 64 * 1024 * 1024,
+            storage: "r2".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "private".to_string(),
+        };
+        let temp_path = PathBuf::from("E:/Downloads/.ebook-neo-part");
+
+        let args = build_rclone_copyto_args(
+            "ebookneo-r2-readonly",
+            "tyut-ebooks-collection-neo",
+            &record,
+            &temp_path,
+            8,
+        )
+        .expect("rclone copyto args should build");
+
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("copyto"),
+                OsString::from(format!(
+                    "ebookneo-r2-readonly:tyut-ebooks-collection-neo/objects/sha256/aa/aa/{}/a.zip",
+                    "a".repeat(64)
+                )),
+                temp_path.into_os_string(),
+                OsString::from("--multi-thread-streams"),
+                OsString::from("8"),
+                OsString::from("--multi-thread-cutoff"),
+                OsString::from("1M"),
+                OsString::from("--multi-thread-chunk-size"),
+                OsString::from("16M"),
+                OsString::from("--stats"),
+                OsString::from("1s"),
             ]
         );
     }
@@ -2020,6 +2335,8 @@ esac
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 1,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
         };
         let sink = RecordingProgressSink::default();
         let cancel_flag = AtomicBool::new(false);
@@ -2038,7 +2355,7 @@ esac
         );
         let events = sink.events();
 
-        assert_eq!(results[0].status, "downloaded");
+        assert_eq!(results[0].status, "downloaded", "{}", results[0].message);
         assert!(events.iter().any(|event| event.kind == "queued"));
         assert!(events.iter().any(|event| event.kind == "started"));
         assert!(events
@@ -2069,6 +2386,8 @@ esac
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 1,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
         };
         let record = test_manifest_record("资料/a.txt", "a.txt");
         let destination = temp_dir.join("downloads").join("资料/a.txt");
@@ -2123,6 +2442,8 @@ esac
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 1,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
         };
         let sink = RecordingProgressSink::default();
         let cancel_flag = AtomicBool::new(true);
@@ -2173,6 +2494,8 @@ esac
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 1,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
         };
         let record = ManifestRecord {
             path: "资料/a.txt".to_string(),
@@ -2219,6 +2542,72 @@ esac
     }
 
     #[test]
+    fn large_file_download_uses_rclone_copyto_and_installs_verified_file() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-copyto-download-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let (fake_rclone_command, fake_rclone_prefix_args) = write_copyto_fake_rclone(&temp_dir);
+        let large_bytes = vec![b'a'; 3 * 1024 * 1024];
+        let large_sha256 = hex_sha256(&Sha256::digest(&large_bytes));
+
+        let request = DownloadRequest {
+            index_repo_path: temp_dir.to_string_lossy().into_owned(),
+            paths: vec!["资料/large.txt".to_string()],
+            download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
+            rclone_path: fake_rclone_command,
+            remote: "ebookneo-r2-readonly".to_string(),
+            bucket: "tyut-ebooks-collection-neo".to_string(),
+            download_jobs: 1,
+            large_file_threshold_mib: 1,
+            large_file_streams: 8,
+        };
+        let record = ManifestRecord {
+            path: "资料/large.txt".to_string(),
+            object_key: object_key_for_sha(&large_sha256, "large.txt"),
+            sha256: large_sha256,
+            size: 3 * 1024 * 1024,
+            storage: "r2".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "private".to_string(),
+        };
+
+        let results = download_records_with_prefix_args(
+            &temp_dir,
+            &request,
+            vec![record],
+            &fake_rclone_prefix_args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        let downloaded = temp_dir.join("downloads").join("资料/large.txt");
+        let temp_downloaded = temp_download_path(&downloaded);
+        let marker = temp_dir.join("copyto.args");
+
+        assert_eq!(results[0].status, "downloaded", "{}", results[0].message);
+        assert_eq!(
+            fs::read(&downloaded).expect("downloaded file should exist"),
+            large_bytes
+        );
+        assert!(
+            !temp_downloaded.exists(),
+            "temporary download file should be moved into place"
+        );
+        assert!(
+            fs::read_to_string(marker)
+                .expect("fake rclone marker should exist")
+                .contains("copyto"),
+            "large download should use rclone copyto"
+        );
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
     fn download_records_reports_failures_without_stopping_the_batch() {
         let temp_dir = std::env::temp_dir().join(format!(
             "ebook-neo-structured-download-test-{}",
@@ -2239,6 +2628,8 @@ esac
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 1,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
         };
         let records = vec![
             ManifestRecord {
@@ -2295,6 +2686,8 @@ esac
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 4,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
         };
 
         validate_download_request(&request).expect("download request should validate");
@@ -2317,6 +2710,8 @@ esac
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 1,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
         };
 
         let future = assert_download_future(download_selected(request));
@@ -2395,6 +2790,8 @@ esac
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 4,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
         };
 
         let error = validate_download_request(&request).expect_err("empty selection should fail");
@@ -2412,6 +2809,8 @@ esac
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 17,
+            large_file_threshold_mib: 20,
+            large_file_streams: 8,
         };
 
         let error = validate_download_request(&request).expect_err("too many jobs should fail");
@@ -2429,6 +2828,8 @@ esac
         assert_eq!(settings.remote, "ebookneo-r2-readonly");
         assert_eq!(settings.bucket, "tyut-ebooks-collection-neo");
         assert_eq!(settings.download_jobs, 4);
+        assert_eq!(settings.large_file_threshold_mib, 20);
+        assert_eq!(settings.large_file_streams, 8);
         assert_eq!(settings.theme, "light");
     }
 
@@ -2450,6 +2851,8 @@ esac
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 6,
+            large_file_threshold_mib: 32,
+            large_file_streams: 12,
             theme: "dark".to_string(),
         };
 

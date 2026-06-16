@@ -4,6 +4,8 @@ import {
   buildFolderSummaries,
   buildVisibleFolderSummaries,
   clampDownloadJobs,
+  clampLargeFileStreams,
+  clampLargeFileThresholdMiB,
   filterRecords,
   formatBytes,
   recordsForFolderSelection,
@@ -128,5 +130,20 @@ describe("manifest helpers", () => {
     expect(clampDownloadJobs(0)).toBe(1);
     expect(clampDownloadJobs(8)).toBe(8);
     expect(clampDownloadJobs(99)).toBe(16);
+  });
+
+  it("defaults and clamps large file download settings", () => {
+    expect(defaultAppSettings.largeFileThresholdMiB).toBe(20);
+    expect(defaultAppSettings.largeFileStreams).toBe(8);
+    expect(clampLargeFileThresholdMiB(0)).toBe(1);
+    expect(clampLargeFileThresholdMiB(64)).toBe(64);
+    expect(clampLargeFileThresholdMiB(9000)).toBe(4096);
+    expect(clampLargeFileStreams(0)).toBe(1);
+    expect(clampLargeFileStreams(8)).toBe(8);
+    expect(clampLargeFileStreams(99)).toBe(16);
+    expect(mergeAppSettings({ largeFileThresholdMiB: 0, largeFileStreams: 99 })).toMatchObject({
+      largeFileThresholdMiB: 1,
+      largeFileStreams: 16,
+    });
   });
 });

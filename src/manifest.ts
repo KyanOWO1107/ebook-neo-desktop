@@ -31,6 +31,8 @@ export type AppSettings = {
   remote: string;
   bucket: string;
   downloadJobs: number;
+  largeFileThresholdMiB: number;
+  largeFileStreams: number;
   theme: ThemeMode;
 };
 
@@ -41,6 +43,8 @@ export const defaultAppSettings: AppSettings = {
   remote: "ebookneo-r2-readonly",
   bucket: "tyut-ebooks-collection-neo",
   downloadJobs: 4,
+  largeFileThresholdMiB: 20,
+  largeFileStreams: 8,
   theme: "light",
 };
 
@@ -55,11 +59,29 @@ export function clampDownloadJobs(jobs: number): number {
   return Math.min(16, Math.max(1, Math.trunc(jobs)));
 }
 
+export function clampLargeFileThresholdMiB(value: number): number {
+  if (!Number.isFinite(value)) {
+    return defaultAppSettings.largeFileThresholdMiB;
+  }
+  return Math.min(4096, Math.max(1, Math.trunc(value)));
+}
+
+export function clampLargeFileStreams(value: number): number {
+  if (!Number.isFinite(value)) {
+    return defaultAppSettings.largeFileStreams;
+  }
+  return Math.min(16, Math.max(1, Math.trunc(value)));
+}
+
 export function mergeAppSettings(settings: Partial<AppSettings>): AppSettings {
   return {
     ...defaultAppSettings,
     ...settings,
     downloadJobs: clampDownloadJobs(settings.downloadJobs ?? defaultAppSettings.downloadJobs),
+    largeFileThresholdMiB: clampLargeFileThresholdMiB(
+      settings.largeFileThresholdMiB ?? defaultAppSettings.largeFileThresholdMiB,
+    ),
+    largeFileStreams: clampLargeFileStreams(settings.largeFileStreams ?? defaultAppSettings.largeFileStreams),
     theme: themeAttribute(settings.theme ?? defaultAppSettings.theme),
   };
 }
