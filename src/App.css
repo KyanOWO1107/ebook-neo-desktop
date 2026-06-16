@@ -520,6 +520,57 @@ button.folder-disclosure:hover {
   white-space: pre-wrap;
 }
 
+.progress-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--surface-soft), var(--surface));
+}
+
+.progress-meta,
+.progress-current,
+.progress-counts {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.progress-meta span,
+.progress-current small,
+.progress-counts {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.progress-meta strong,
+.progress-current strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-strong);
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), var(--accent));
+  transition: width 140ms ease;
+}
+
 .result-list {
   display: flex;
   max-height: 190px;
@@ -548,6 +599,10 @@ button.folder-disclosure:hover {
 
 .result-item[data-status="failed"] span {
   color: #c43d3d;
+}
+
+.result-item[data-status="canceled"] span {
+  color: #a05c00;
 }
 
 .result-item strong,
@@ -581,6 +636,17 @@ button.folder-disclosure:hover {
   color: var(--text);
   background: var(--surface-soft);
   border: 1px solid var(--border);
+}
+
+.danger-action {
+  color: #932828;
+  border-color: color-mix(in srgb, #c43d3d 42%, var(--border));
+  background: color-mix(in srgb, #fff2f2 68%, var(--surface-soft));
+}
+
+.app-shell[data-theme="dark"] .danger-action {
+  color: #ffd4d4;
+  background: color-mix(in srgb, #4a151d 62%, var(--surface-soft));
 }
 
 .utility-actions {

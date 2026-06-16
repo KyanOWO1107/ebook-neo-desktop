@@ -806,6 +806,27 @@ fn download_item_result(path: &str, status: &str, message: String) -> DownloadIt
     }
 }
 
+fn emit_canceled_download_event(
+    progress_sink: &dyn ProgressSink,
+    task_id: &str,
+    record: &ManifestRecord,
+    completed_files: usize,
+    failed_files: usize,
+    total_files: usize,
+) {
+    progress_sink.emit(download_progress_event(
+        task_id,
+        "canceled",
+        Some(&record.path),
+        0,
+        record.size,
+        completed_files,
+        failed_files,
+        total_files,
+        &format!("canceled {}", record.path),
+    ));
+}
+
 trait ProgressSink: Sync {
     fn emit(&self, event: DownloadProgressEvent);
 }
@@ -881,17 +902,14 @@ fn try_download_manifest_record_with_prefix_args(
     remove_stale_temp_file(&temp_path)?;
     if cancel_flag.load(Ordering::SeqCst) {
         let _ = fs::remove_file(&temp_path);
-        progress_sink.emit(download_progress_event(
+        emit_canceled_download_event(
+            progress_sink,
             task_id,
-            "canceled",
-            Some(&record.path),
-            0,
-            record.size,
+            record,
             completed_files,
             failed_files,
             total_files,
-            &format!("canceled {}", record.path),
-        ));
+        );
         return Ok(download_item_result(
             &record.path,
             "canceled",
@@ -973,6 +991,14 @@ fn try_download_manifest_record_with_prefix_args(
             .unwrap_or_else(|_| "Failed to join rclone stderr reader".to_string());
         let _ = fs::remove_file(&temp_path);
         if error == "Download canceled" {
+            emit_canceled_download_event(
+                progress_sink,
+                task_id,
+                record,
+                completed_files,
+                failed_files,
+                total_files,
+            );
             return Ok(download_item_result(
                 &record.path,
                 "canceled",
@@ -1106,6 +1132,14 @@ fn download_records_with_progress(
         let mut results = Vec::new();
         for record in &deduped {
             if cancel_flag.load(Ordering::SeqCst) {
+                emit_canceled_download_event(
+                    progress_sink,
+                    task_id,
+                    record,
+                    completed_files,
+                    failed_files,
+                    total_files,
+                );
                 results.push(download_item_result(
                     &record.path,
                     "canceled",
@@ -1176,6 +1210,14 @@ fn download_records_with_progress(
                 };
 
                 let result = if cancel_flag.load(Ordering::SeqCst) {
+                    emit_canceled_download_event(
+                        progress_sink,
+                        task_id,
+                        &record,
+                        completed_files.load(Ordering::SeqCst),
+                        failed_files.load(Ordering::SeqCst),
+                        total_files,
+                    );
                     download_item_result(
                         &record.path,
                         "canceled",
@@ -2060,6 +2102,54 @@ esac
             !temp_download.exists(),
             "partial file should be removed on cancellation"
         );
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn queued_cancellation_emits_canceled_progress_events() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-queued-cancel-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let request = DownloadRequest {
+            index_repo_path: temp_dir.to_string_lossy().into_owned(),
+            paths: vec!["资料/a.txt".to_string(), "资料/b.txt".to_string()],
+            download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
+            rclone_path: "rclone".to_string(),
+            remote: "ebookneo-r2-readonly".to_string(),
+            bucket: "tyut-ebooks-collection-neo".to_string(),
+            download_jobs: 1,
+        };
+        let sink = RecordingProgressSink::default();
+        let cancel_flag = AtomicBool::new(true);
+
+        let results = download_records_with_progress(
+            &temp_dir,
+            &request,
+            vec![
+                test_manifest_record("资料/a.txt", "a.txt"),
+                test_manifest_record("资料/b.txt", "b.txt"),
+            ],
+            &[],
+            "task-queued-cancel",
+            &sink,
+            &cancel_flag,
+        );
+        let events = sink.events();
+        let canceled_events = events
+            .iter()
+            .filter(|event| event.kind == "canceled")
+            .collect::<Vec<_>>();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.status == "canceled"));
+        assert_eq!(canceled_events.len(), 2);
+        assert_eq!(canceled_events[0].path.as_deref(), Some("资料/a.txt"));
+        assert_eq!(canceled_events[1].path.as_deref(), Some("资料/b.txt"));
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
     }
 

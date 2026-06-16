@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   ChevronRight,
   Download,
@@ -8,11 +9,12 @@ import {
   RefreshCw,
   Save,
   Search,
+  Square,
   Sun,
   UploadCloud,
   Wifi,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import {
   defaultAppSettings,
@@ -29,15 +31,25 @@ import {
   type ManifestRecord,
 } from "./manifest";
 
-type DownloadResult = {
-  stdout: string;
-  stderr: string;
-  items: DownloadItemResult[];
+type DownloadItemResult = {
+  path: string | null;
+  status: "downloaded" | "createdEmpty" | "failed" | "canceled";
+  message: string;
 };
 
-type DownloadItemResult = {
-  path: string;
-  status: "downloaded" | "createdEmpty" | "failed";
+type DownloadTask = {
+  taskId: string;
+};
+
+type DownloadProgressEvent = {
+  taskId: string;
+  kind: "queued" | "started" | "progress" | "finished" | "failed" | "canceled" | "completed";
+  path: string | null;
+  bytesWritten: number;
+  totalBytes: number;
+  completedFiles: number;
+  failedFiles: number;
+  totalFiles: number;
   message: string;
 };
 
@@ -61,7 +73,11 @@ function App() {
   const [isOpeningDownloadRoot, setIsOpeningDownloadRoot] = useState(false);
   const [downloadLog, setDownloadLog] = useState("等待选择...");
   const [downloadResults, setDownloadResults] = useState<DownloadItemResult[]>([]);
+  const [activeDownloadTaskId, setActiveDownloadTaskId] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgressEvent | null>(null);
   const [downloadSettings, setDownloadSettings] = useState<AppSettings>(defaultAppSettings);
+  const activeDownloadTaskIdRef = useRef<string | null>(null);
+  const isAwaitingDownloadTaskRef = useRef(false);
 
   async function loadManifest(indexRepoPath = downloadSettings.indexRepoPath) {
     setIsLoading(true);
@@ -180,6 +196,29 @@ function App() {
     loadSettings();
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    listen<DownloadProgressEvent>("download-progress", (event) => {
+      if (disposed) {
+        return;
+      }
+      handleDownloadProgress(event.payload);
+    }).then((removeListener) => {
+      if (disposed) {
+        removeListener();
+      } else {
+        unlisten = removeListener;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const folders = useMemo(() => buildFolderSummaries(records), [records]);
   const visibleFolders = useMemo(() => buildVisibleFolderSummaries(folders, expandedRoots), [expandedRoots, folders]);
   const summary = useMemo(() => summarizeRecords(records), [records]);
@@ -244,17 +283,74 @@ function App() {
     });
   }
 
+  function handleDownloadProgress(event: DownloadProgressEvent) {
+    if (!activeDownloadTaskIdRef.current && isAwaitingDownloadTaskRef.current) {
+      activeDownloadTaskIdRef.current = event.taskId;
+      setActiveDownloadTaskId(event.taskId);
+      setDownloadProgress((current) => (current ? { ...current, taskId: event.taskId } : current));
+    }
+
+    if (activeDownloadTaskIdRef.current !== event.taskId) {
+      return;
+    }
+
+    setDownloadProgress(event);
+    setDownloadLog(event.message);
+    if (event.path && ["finished", "failed", "canceled"].includes(event.kind)) {
+      const status =
+        event.kind === "finished"
+          ? event.totalBytes === 0
+            ? "createdEmpty"
+            : "downloaded"
+          : event.kind;
+      setDownloadResults((items) => [
+        ...items.filter((item) => item.path !== event.path),
+        {
+          path: event.path,
+          status: status as DownloadItemResult["status"],
+          message: event.message,
+        },
+      ]);
+    }
+
+    if (event.kind === "completed") {
+      setIsDownloading(false);
+      isAwaitingDownloadTaskRef.current = false;
+      activeDownloadTaskIdRef.current = null;
+      setActiveDownloadTaskId(null);
+      setStatus(
+        event.failedFiles > 0
+          ? `下载完成，${event.failedFiles.toLocaleString()} 个文件失败`
+          : `下载完成：${event.completedFiles.toLocaleString()} 个文件`,
+      );
+    }
+  }
+
   async function downloadPaths(paths: string[]) {
     if (paths.length === 0 || isDownloading) {
       return;
     }
 
     setIsDownloading(true);
+    isAwaitingDownloadTaskRef.current = true;
+    activeDownloadTaskIdRef.current = null;
+    setActiveDownloadTaskId(null);
     setStatus(`正在下载 ${paths.length.toLocaleString()} 个文件...`);
     setDownloadLog(commandPreview);
     setDownloadResults([]);
+    setDownloadProgress({
+      taskId: "",
+      kind: "queued",
+      path: null,
+      bytesWritten: 0,
+      totalBytes: 0,
+      completedFiles: 0,
+      failedFiles: 0,
+      totalFiles: paths.length,
+      message: `queued ${paths.length.toLocaleString()} file(s)`,
+    });
     try {
-      const result = await invoke<DownloadResult>("download_selected", {
+      const task = await invoke<DownloadTask>("start_download", {
         request: {
           indexRepoPath: downloadSettings.indexRepoPath,
           paths,
@@ -265,17 +361,36 @@ function App() {
           downloadJobs: downloadSettings.downloadJobs,
         },
       });
-      const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n\n");
-      setDownloadLog(output || "下载命令执行完成。");
-      setDownloadResults(result.items ?? []);
-      const failures = result.items?.filter((item) => item.status === "failed").length ?? 0;
-      setStatus(failures > 0 ? `下载完成，${failures.toLocaleString()} 个文件失败` : `下载完成：${paths.length.toLocaleString()} 个文件`);
+      if (activeDownloadTaskIdRef.current && activeDownloadTaskIdRef.current !== task.taskId) {
+        throw new Error(`下载任务事件不匹配：${activeDownloadTaskIdRef.current} != ${task.taskId}`);
+      }
+      isAwaitingDownloadTaskRef.current = false;
+      activeDownloadTaskIdRef.current = task.taskId;
+      setActiveDownloadTaskId(task.taskId);
+      setDownloadProgress((current) => (current ? { ...current, taskId: task.taskId } : current));
+      setStatus(`下载任务已开始：${paths.length.toLocaleString()} 个文件`);
     } catch (error) {
+      isAwaitingDownloadTaskRef.current = false;
+      activeDownloadTaskIdRef.current = null;
+      setActiveDownloadTaskId(null);
       setDownloadLog(error instanceof Error ? error.message : String(error));
       setDownloadResults([]);
       setStatus("下载失败");
-    } finally {
       setIsDownloading(false);
+    }
+  }
+
+  async function cancelActiveDownload() {
+    if (!activeDownloadTaskId) {
+      return;
+    }
+    try {
+      await invoke<CommandResult>("cancel_download", { taskId: activeDownloadTaskId });
+      setStatus("正在取消下载...");
+      setDownloadLog(`正在取消下载任务：${activeDownloadTaskId}`);
+    } catch (error) {
+      setStatus("取消下载失败");
+      setDownloadLog(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -284,11 +399,24 @@ function App() {
   }
 
   async function retryFailedDownloads() {
-    const failedPaths = downloadResults.filter((item) => item.status === "failed").map((item) => item.path);
+    const failedPaths = downloadResults
+      .filter((item) => item.status === "failed" && item.path)
+      .map((item) => item.path as string);
     await downloadPaths(failedPaths);
   }
 
   const failedDownloadCount = downloadResults.filter((item) => item.status === "failed").length;
+  const canceledDownloadCount = downloadResults.filter((item) => item.status === "canceled").length;
+  const currentFileName = downloadProgress?.path?.split("/").pop() ?? "等待文件...";
+  const currentByteProgress =
+    downloadProgress && downloadProgress.totalBytes > 0
+      ? `${formatBytes(downloadProgress.bytesWritten)} / ${formatBytes(downloadProgress.totalBytes)}`
+      : "等待进度...";
+  const totalProgressCount =
+    (downloadProgress?.completedFiles ?? 0) + (downloadProgress?.failedFiles ?? 0) + canceledDownloadCount;
+  const totalProgressFiles = downloadProgress?.totalFiles ?? 0;
+  const overallProgressPercent =
+    totalProgressFiles > 0 ? Math.min(100, Math.round((totalProgressCount / totalProgressFiles) * 100)) : 0;
 
   const commandPreview =
     selectedRecords.length === 1
@@ -568,12 +696,41 @@ function App() {
               </button>
             </div>
             <pre className="command-preview">{selectedRecords.length > 0 ? downloadLog : "等待选择..."}</pre>
+            {downloadProgress && (
+              <div className="progress-panel" aria-label="下载进度">
+                <div className="progress-meta">
+                  <span>{downloadProgress.kind === "completed" ? "任务完成" : "实时进度"}</span>
+                  <strong>
+                    {totalProgressCount.toLocaleString()} / {totalProgressFiles.toLocaleString()}
+                  </strong>
+                </div>
+                <div className="progress-track" aria-label="整体下载进度">
+                  <span style={{ width: `${overallProgressPercent}%` }} />
+                </div>
+                <div className="progress-current">
+                  <strong title={downloadProgress.path ?? undefined}>{currentFileName}</strong>
+                  <small>{currentByteProgress}</small>
+                </div>
+                <small className="progress-counts">
+                  完成 {downloadProgress.completedFiles.toLocaleString()} · 失败{" "}
+                  {downloadProgress.failedFiles.toLocaleString()} · 取消 {canceledDownloadCount.toLocaleString()}
+                </small>
+              </div>
+            )}
             {downloadResults.length > 0 && (
               <div className="result-list" aria-label="下载结果">
                 {downloadResults.slice(0, 8).map((item) => (
-                  <div className="result-item" data-status={item.status} key={`${item.status}-${item.path}`}>
-                    <span>{item.status === "failed" ? "失败" : item.status === "createdEmpty" ? "空文件" : "完成"}</span>
-                    <strong title={item.path}>{item.path.split("/").pop()}</strong>
+                  <div className="result-item" data-status={item.status} key={`${item.status}-${item.path ?? "task"}`}>
+                    <span>
+                      {item.status === "failed"
+                        ? "失败"
+                        : item.status === "createdEmpty"
+                          ? "空文件"
+                          : item.status === "canceled"
+                            ? "取消"
+                            : "完成"}
+                    </span>
+                    <strong title={item.path ?? undefined}>{item.path?.split("/").pop() ?? "下载任务"}</strong>
                     <small>{item.message}</small>
                   </div>
                 ))}
@@ -591,6 +748,16 @@ function App() {
               >
                 <RefreshCw size={16} />
                 重试失败
+              </button>
+            )}
+            {activeDownloadTaskId && (
+              <button
+                className="secondary-action danger-action"
+                type="button"
+                onClick={cancelActiveDownload}
+              >
+                <Square size={16} />
+                取消下载
               </button>
             )}
             <button
