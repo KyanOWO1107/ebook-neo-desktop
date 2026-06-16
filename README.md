@@ -70,11 +70,13 @@ npm run tauri dev
 ```bash
 npm test
 npm run build
+npm audit --audit-level=moderate --registry=https://registry.npmjs.org
 ```
 
 Rust 后端验证在 `src-tauri` 中运行：
 
 ```bash
+cargo fmt --check
 cargo test
 cargo check
 ```
@@ -85,6 +87,8 @@ cargo check
 $env:CARGO_BUILD_JOBS='1'; cargo test
 $env:CARGO_BUILD_JOBS='1'; cargo check
 ```
+
+仓库包含 GitHub Actions CI。推送到 `main` 或创建面向 `main` 的 Pull Request 时，CI 会在 Ubuntu 上执行上述前端和 Rust 检查；它只做质量门禁，不生成安装包。
 
 ## 下载行为
 

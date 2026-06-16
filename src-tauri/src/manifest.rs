@@ -984,6 +984,104 @@ mod tests {
         )
     }
 
+    #[cfg(windows)]
+    fn write_success_fake_rclone(temp_dir: &Path) -> (String, Vec<String>) {
+        let fake_rclone = temp_dir.join("fake-rclone.ps1");
+        fs::write(
+            &fake_rclone,
+            "[Console]::OpenStandardOutput().Write([byte[]](97,98,99), 0, 3)\r\n",
+        )
+        .expect("fake rclone should be written");
+
+        (
+            "powershell".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                fake_rclone
+                    .to_str()
+                    .expect("fake rclone path should be utf-8")
+                    .to_string(),
+            ],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn write_success_fake_rclone(temp_dir: &Path) -> (String, Vec<String>) {
+        let fake_rclone = temp_dir.join("fake-rclone.sh");
+        fs::write(&fake_rclone, "#!/bin/sh\nprintf abc\n").expect("fake rclone should be written");
+
+        (
+            "sh".to_string(),
+            vec![fake_rclone.to_string_lossy().into_owned()],
+        )
+    }
+
+    #[cfg(windows)]
+    fn write_mixed_result_fake_rclone(temp_dir: &Path) -> (String, Vec<String>) {
+        let fake_rclone = temp_dir.join("fake-rclone.ps1");
+        fs::write(
+            &fake_rclone,
+            r#"
+$target = $args[-1]
+if ($target -like "*good.txt") {
+  [Console]::OpenStandardOutput().Write([byte[]](97,98,99), 0, 3)
+  exit 0
+}
+[Console]::Error.Write("missing object")
+exit 1
+"#,
+        )
+        .expect("fake rclone should be written");
+
+        (
+            "powershell".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                fake_rclone
+                    .to_str()
+                    .expect("fake rclone path should be utf-8")
+                    .to_string(),
+            ],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn write_mixed_result_fake_rclone(temp_dir: &Path) -> (String, Vec<String>) {
+        let fake_rclone = temp_dir.join("fake-rclone.sh");
+        fs::write(
+            &fake_rclone,
+            r#"#!/bin/sh
+target=""
+for arg do
+  target="$arg"
+done
+
+case "$target" in
+  *good.txt)
+    printf abc
+    exit 0
+    ;;
+  *)
+    printf "missing object" >&2
+    exit 1
+    ;;
+esac
+"#,
+        )
+        .expect("fake rclone should be written");
+
+        (
+            "sh".to_string(),
+            vec![fake_rclone.to_string_lossy().into_owned()],
+        )
+    }
+
     #[test]
     fn parses_jsonl_manifest_records() {
         let a_sha = "a".repeat(64);
@@ -1355,18 +1453,13 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&temp_dir).expect("temp dir should be created");
-        let fake_rclone = temp_dir.join("fake-rclone.ps1");
-        fs::write(
-            &fake_rclone,
-            "[Console]::OpenStandardOutput().Write([byte[]](97,98,99), 0, 3)\r\n",
-        )
-        .expect("fake rclone should be written");
+        let (fake_rclone_command, fake_rclone_prefix_args) = write_success_fake_rclone(&temp_dir);
 
         let request = DownloadRequest {
             index_repo_path: temp_dir.to_string_lossy().into_owned(),
             paths: vec!["资料/a.txt".to_string()],
             download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
-            rclone_path: "powershell".to_string(),
+            rclone_path: fake_rclone_command,
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 1,
@@ -1388,12 +1481,10 @@ mod tests {
             &temp_dir,
             &request,
             vec![record],
-            &[
-                "-File",
-                fake_rclone
-                    .to_str()
-                    .expect("fake rclone path should be utf-8"),
-            ],
+            &fake_rclone_prefix_args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
         );
         let downloaded = temp_dir.join("downloads").join("资料/a.txt");
         let temp_downloaded = temp_download_path(&downloaded);
@@ -1427,26 +1518,14 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&temp_dir).expect("temp dir should be created");
-        let fake_rclone = temp_dir.join("fake-rclone.ps1");
-        fs::write(
-            &fake_rclone,
-            r#"
-$target = $args[-1]
-if ($target -like "*good.txt") {
-  [Console]::OpenStandardOutput().Write([byte[]](97,98,99), 0, 3)
-  exit 0
-}
-[Console]::Error.Write("missing object")
-exit 1
-"#,
-        )
-        .expect("fake rclone should be written");
+        let (fake_rclone_command, fake_rclone_prefix_args) =
+            write_mixed_result_fake_rclone(&temp_dir);
 
         let request = DownloadRequest {
             index_repo_path: temp_dir.to_string_lossy().into_owned(),
             paths: vec!["资料/good.txt".to_string(), "资料/bad.txt".to_string()],
             download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
-            rclone_path: "powershell".to_string(),
+            rclone_path: fake_rclone_command,
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
             download_jobs: 1,
@@ -1480,12 +1559,10 @@ exit 1
             &temp_dir,
             &request,
             records,
-            &[
-                "-File",
-                fake_rclone
-                    .to_str()
-                    .expect("fake rclone path should be utf-8"),
-            ],
+            &fake_rclone_prefix_args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
         );
 
         assert_eq!(results.len(), 2);
