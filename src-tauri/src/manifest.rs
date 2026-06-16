@@ -6,12 +6,15 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+static DOWNLOAD_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
+static DOWNLOAD_TASKS: OnceLock<DownloadTaskRegistry> = OnceLock::new();
 
 #[cfg(test)]
 const PRODUCTION_CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost";
@@ -121,6 +124,26 @@ pub struct DownloadItemResult {
     pub message: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadTask {
+    pub task_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadProgressEvent {
+    pub task_id: String,
+    pub kind: String,
+    pub path: Option<String>,
+    pub bytes_written: u64,
+    pub total_bytes: u64,
+    pub completed_files: usize,
+    pub failed_files: usize,
+    pub total_files: usize,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
@@ -161,6 +184,76 @@ pub struct CommandResult {
 
 fn default_settings() -> AppSettings {
     AppSettings::default()
+}
+
+#[derive(Default)]
+struct DownloadTaskRegistry {
+    cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl DownloadTaskRegistry {
+    fn insert(&self, task_id: String, cancel_flag: Arc<AtomicBool>) -> Result<(), String> {
+        let mut flags = self
+            .cancel_flags
+            .lock()
+            .map_err(|_| "Download task registry lock was poisoned".to_string())?;
+        flags.insert(task_id, cancel_flag);
+        Ok(())
+    }
+
+    fn cancel(&self, task_id: &str) -> Result<(), String> {
+        let flags = self
+            .cancel_flags
+            .lock()
+            .map_err(|_| "Download task registry lock was poisoned".to_string())?;
+        let flag = flags
+            .get(task_id)
+            .ok_or_else(|| format!("Download task not found: {}", task_id))?;
+        flag.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn remove(&self, task_id: &str) -> Result<(), String> {
+        let mut flags = self
+            .cancel_flags
+            .lock()
+            .map_err(|_| "Download task registry lock was poisoned".to_string())?;
+        flags.remove(task_id);
+        Ok(())
+    }
+}
+
+fn download_task_registry() -> &'static DownloadTaskRegistry {
+    DOWNLOAD_TASKS.get_or_init(DownloadTaskRegistry::default)
+}
+
+fn next_download_task_id() -> String {
+    let id = DOWNLOAD_TASK_COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!("download-{}", id)
+}
+
+fn download_progress_event(
+    task_id: &str,
+    kind: &str,
+    path: Option<&str>,
+    bytes_written: u64,
+    total_bytes: u64,
+    completed_files: usize,
+    failed_files: usize,
+    total_files: usize,
+    message: &str,
+) -> DownloadProgressEvent {
+    DownloadProgressEvent {
+        task_id: task_id.to_string(),
+        kind: kind.to_string(),
+        path: path.map(ToString::to_string),
+        bytes_written,
+        total_bytes,
+        completed_files,
+        failed_files,
+        total_files,
+        message: message.to_string(),
+    }
 }
 
 fn validate_settings(settings: &AppSettings) -> Result<(), String> {
@@ -643,6 +736,68 @@ where
     }
 }
 
+fn stream_download_output<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    cancel_flag: &AtomicBool,
+    progress_sink: &dyn ProgressSink,
+    task_id: &str,
+    record: &ManifestRecord,
+    completed_files: usize,
+    failed_files: usize,
+    total_files: usize,
+) -> Result<u64, String>
+where
+    R: Read,
+    W: Write,
+{
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut bytes_written = 0_u64;
+
+    loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err("Download canceled".to_string());
+        }
+
+        let read = reader.read(&mut buffer).map_err(|error| {
+            format!(
+                "Failed to read rclone output for {}: {}",
+                record.path, error
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+
+        writer.write_all(&buffer[..read]).map_err(|error| {
+            format!(
+                "Failed to write downloaded bytes for {}: {}",
+                record.path, error
+            )
+        })?;
+        bytes_written += read as u64;
+        progress_sink.emit(download_progress_event(
+            task_id,
+            "progress",
+            Some(&record.path),
+            bytes_written,
+            record.size,
+            completed_files,
+            failed_files,
+            total_files,
+            &format!("streaming {}", record.path),
+        ));
+    }
+
+    writer.flush().map_err(|error| {
+        format!(
+            "Failed to flush downloaded bytes for {}: {}",
+            record.path, error
+        )
+    })?;
+    Ok(bytes_written)
+}
+
 fn download_item_result(path: &str, status: &str, message: String) -> DownloadItemResult {
     DownloadItemResult {
         path: path.to_string(),
@@ -651,15 +806,49 @@ fn download_item_result(path: &str, status: &str, message: String) -> DownloadIt
     }
 }
 
-fn download_manifest_record_with_prefix_args(
-    index_root: &Path,
-    request: &DownloadRequest,
-    record: &ManifestRecord,
-    prefix_args: &[&str],
-) -> DownloadItemResult {
-    match try_download_manifest_record_with_prefix_args(index_root, request, record, prefix_args) {
-        Ok(result) => result,
-        Err(error) => download_item_result(&record.path, "failed", error),
+trait ProgressSink: Sync {
+    fn emit(&self, event: DownloadProgressEvent);
+}
+
+struct NoopProgressSink;
+
+impl ProgressSink for NoopProgressSink {
+    fn emit(&self, _event: DownloadProgressEvent) {}
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct RecordingProgressSink {
+    events: Mutex<Vec<DownloadProgressEvent>>,
+}
+
+#[cfg(test)]
+impl RecordingProgressSink {
+    fn events(&self) -> Vec<DownloadProgressEvent> {
+        self.events
+            .lock()
+            .expect("event lock should not be poisoned")
+            .clone()
+    }
+}
+
+#[cfg(test)]
+impl ProgressSink for RecordingProgressSink {
+    fn emit(&self, event: DownloadProgressEvent) {
+        self.events
+            .lock()
+            .expect("event lock should not be poisoned")
+            .push(event);
+    }
+}
+
+struct TauriProgressSink {
+    app: AppHandle,
+}
+
+impl ProgressSink for TauriProgressSink {
+    fn emit(&self, event: DownloadProgressEvent) {
+        let _ = self.app.emit("download-progress", event);
     }
 }
 
@@ -668,6 +857,12 @@ fn try_download_manifest_record_with_prefix_args(
     request: &DownloadRequest,
     record: &ManifestRecord,
     prefix_args: &[&str],
+    task_id: &str,
+    progress_sink: &dyn ProgressSink,
+    cancel_flag: &AtomicBool,
+    completed_files: usize,
+    failed_files: usize,
+    total_files: usize,
 ) -> Result<DownloadItemResult, String> {
     validate_manifest_record(record)?;
     let destination = build_destination_path(index_root, &request.download_root, &record.path)?;
@@ -684,11 +879,52 @@ fn try_download_manifest_record_with_prefix_args(
 
     let temp_path = temp_download_path(&destination);
     remove_stale_temp_file(&temp_path)?;
+    if cancel_flag.load(Ordering::SeqCst) {
+        let _ = fs::remove_file(&temp_path);
+        progress_sink.emit(download_progress_event(
+            task_id,
+            "canceled",
+            Some(&record.path),
+            0,
+            record.size,
+            completed_files,
+            failed_files,
+            total_files,
+            &format!("canceled {}", record.path),
+        ));
+        return Ok(download_item_result(
+            &record.path,
+            "canceled",
+            format!("canceled {}", record.path),
+        ));
+    }
+    progress_sink.emit(download_progress_event(
+        task_id,
+        "started",
+        Some(&record.path),
+        0,
+        record.size,
+        completed_files,
+        failed_files,
+        total_files,
+        &format!("downloading {}", record.path),
+    ));
     if record.size == 0 {
         fs::write(&temp_path, [])
             .map_err(|error| format!("Failed to write {}: {}", temp_path.display(), error))?;
         verify_downloaded_file(&temp_path, record.size, &record.sha256)?;
         install_verified_download(&temp_path, &destination)?;
+        progress_sink.emit(download_progress_event(
+            task_id,
+            "finished",
+            Some(&record.path),
+            0,
+            0,
+            completed_files + 1,
+            failed_files,
+            total_files,
+            &format!("created empty file {}", record.path),
+        ));
         return Ok(download_item_result(
             &record.path,
             "createdEmpty",
@@ -718,19 +954,32 @@ fn try_download_manifest_record_with_prefix_args(
     let stderr_thread = thread::spawn(move || read_pipe_to_string(stderr));
     let mut temp_file = fs::File::create(&temp_path)
         .map_err(|error| format!("Failed to create {}: {}", temp_path.display(), error))?;
-    if let Err(error) = std::io::copy(&mut stdout, &mut temp_file) {
+    let stream_result = stream_download_output(
+        &mut stdout,
+        &mut temp_file,
+        cancel_flag,
+        progress_sink,
+        task_id,
+        record,
+        completed_files,
+        failed_files,
+        total_files,
+    );
+    if let Err(error) = stream_result {
         let _ = child.kill();
         let _ = child.wait();
         let stderr_text = stderr_thread
             .join()
             .unwrap_or_else(|_| "Failed to join rclone stderr reader".to_string());
         let _ = fs::remove_file(&temp_path);
-        return Err(format!(
-            "Failed to stream rclone output to {}: {}\n{}",
-            temp_path.display(),
-            error,
-            stderr_text
-        ));
+        if error == "Download canceled" {
+            return Ok(download_item_result(
+                &record.path,
+                "canceled",
+                format!("canceled {}", record.path),
+            ));
+        }
+        return Err(format!("{}\n{}", error, stderr_text));
     }
     temp_file
         .flush()
@@ -746,6 +995,17 @@ fn try_download_manifest_record_with_prefix_args(
 
     if !status.success() {
         let _ = fs::remove_file(&temp_path);
+        progress_sink.emit(download_progress_event(
+            task_id,
+            "failed",
+            Some(&record.path),
+            0,
+            record.size,
+            completed_files,
+            failed_files + 1,
+            total_files,
+            &format!("failed {}", record.path),
+        ));
         return Err(format!(
             "rclone cat failed for {} with status {}.\n{}",
             record.path, status, stderr_text
@@ -754,6 +1014,17 @@ fn try_download_manifest_record_with_prefix_args(
 
     verify_downloaded_file(&temp_path, record.size, &record.sha256)?;
     install_verified_download(&temp_path, &destination)?;
+    progress_sink.emit(download_progress_event(
+        task_id,
+        "finished",
+        Some(&record.path),
+        record.size,
+        record.size,
+        completed_files + 1,
+        failed_files,
+        total_files,
+        &format!("downloaded {}", record.path),
+    ));
 
     Ok(download_item_result(
         &record.path,
@@ -767,14 +1038,47 @@ fn download_records(
     request: &DownloadRequest,
     records: Vec<ManifestRecord>,
 ) -> Vec<DownloadItemResult> {
-    download_records_with_prefix_args(index_root, request, records, &[])
+    let sink = NoopProgressSink;
+    let cancel_flag = AtomicBool::new(false);
+    download_records_with_progress(
+        index_root,
+        request,
+        records,
+        &[],
+        "legacy-download",
+        &sink,
+        &cancel_flag,
+    )
 }
 
+#[cfg(test)]
 fn download_records_with_prefix_args(
     index_root: &Path,
     request: &DownloadRequest,
     records: Vec<ManifestRecord>,
     prefix_args: &[&str],
+) -> Vec<DownloadItemResult> {
+    let sink = NoopProgressSink;
+    let cancel_flag = AtomicBool::new(false);
+    download_records_with_progress(
+        index_root,
+        request,
+        records,
+        prefix_args,
+        "legacy-download",
+        &sink,
+        &cancel_flag,
+    )
+}
+
+fn download_records_with_progress(
+    index_root: &Path,
+    request: &DownloadRequest,
+    records: Vec<ManifestRecord>,
+    prefix_args: &[&str],
+    task_id: &str,
+    progress_sink: &dyn ProgressSink,
+    cancel_flag: &AtomicBool,
 ) -> Vec<DownloadItemResult> {
     let mut deduped = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -783,24 +1087,83 @@ fn download_records_with_prefix_args(
             deduped.push(record);
         }
     }
+    let total_files = deduped.len();
+    progress_sink.emit(download_progress_event(
+        task_id,
+        "queued",
+        None,
+        0,
+        0,
+        0,
+        0,
+        total_files,
+        &format!("queued {} file(s)", total_files),
+    ));
 
     if request.download_jobs == 1 || deduped.len() <= 1 {
-        return deduped
-            .iter()
-            .map(|record| {
-                download_manifest_record_with_prefix_args(index_root, request, record, prefix_args)
-            })
-            .collect();
+        let mut completed_files = 0_usize;
+        let mut failed_files = 0_usize;
+        let mut results = Vec::new();
+        for record in &deduped {
+            if cancel_flag.load(Ordering::SeqCst) {
+                results.push(download_item_result(
+                    &record.path,
+                    "canceled",
+                    format!("canceled {}", record.path),
+                ));
+                continue;
+            }
+            let result = match try_download_manifest_record_with_prefix_args(
+                index_root,
+                request,
+                record,
+                prefix_args,
+                task_id,
+                progress_sink,
+                cancel_flag,
+                completed_files,
+                failed_files,
+                total_files,
+            ) {
+                Ok(result) => result,
+                Err(error) => download_item_result(&record.path, "failed", error),
+            };
+            if result.status == "failed" {
+                failed_files += 1;
+            } else if result.status != "canceled" {
+                completed_files += 1;
+            }
+            results.push(result);
+        }
+        progress_sink.emit(download_progress_event(
+            task_id,
+            "completed",
+            None,
+            0,
+            0,
+            completed_files,
+            failed_files,
+            total_files,
+            &format!(
+                "download task completed: {} complete, {} failed",
+                completed_files, failed_files
+            ),
+        ));
+        return results;
     }
 
     let queue = Arc::new(Mutex::new(VecDeque::from(deduped)));
     let results = Arc::new(Mutex::new(Vec::new()));
-    let worker_count = usize::min(request.download_jobs as usize, request.paths.len());
+    let completed_files = AtomicUsize::new(0);
+    let failed_files = AtomicUsize::new(0);
+    let worker_count = usize::min(request.download_jobs as usize, total_files);
 
     thread::scope(|scope| {
         for _ in 0..worker_count {
             let queue = Arc::clone(&queue);
             let results = Arc::clone(&results);
+            let completed_files = &completed_files;
+            let failed_files = &failed_files;
 
             scope.spawn(move || loop {
                 let record = {
@@ -812,12 +1175,34 @@ fn download_records_with_prefix_args(
                     return;
                 };
 
-                let result = download_manifest_record_with_prefix_args(
-                    index_root,
-                    request,
-                    &record,
-                    prefix_args,
-                );
+                let result = if cancel_flag.load(Ordering::SeqCst) {
+                    download_item_result(
+                        &record.path,
+                        "canceled",
+                        format!("canceled {}", record.path),
+                    )
+                } else {
+                    match try_download_manifest_record_with_prefix_args(
+                        index_root,
+                        request,
+                        &record,
+                        prefix_args,
+                        task_id,
+                        progress_sink,
+                        cancel_flag,
+                        completed_files.load(Ordering::SeqCst),
+                        failed_files.load(Ordering::SeqCst),
+                        total_files,
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => download_item_result(&record.path, "failed", error),
+                    }
+                };
+                if result.status == "failed" {
+                    failed_files.fetch_add(1, Ordering::SeqCst);
+                } else if result.status != "canceled" {
+                    completed_files.fetch_add(1, Ordering::SeqCst);
+                }
                 results
                     .lock()
                     .expect("result lock should not be poisoned")
@@ -830,6 +1215,21 @@ fn download_records_with_prefix_args(
         .lock()
         .expect("result lock should not be poisoned")
         .clone();
+    progress_sink.emit(download_progress_event(
+        task_id,
+        "completed",
+        None,
+        0,
+        0,
+        completed_files.load(Ordering::SeqCst),
+        failed_files.load(Ordering::SeqCst),
+        total_files,
+        &format!(
+            "download task completed: {} complete, {} failed",
+            completed_files.load(Ordering::SeqCst),
+            failed_files.load(Ordering::SeqCst)
+        ),
+    ));
     collected_results
 }
 
@@ -970,6 +1370,62 @@ pub async fn download_selected(request: DownloadRequest) -> Result<DownloadResul
         .map_err(|error| format!("Download worker failed: {}", error))?
 }
 
+fn start_download_blocking(
+    app: AppHandle,
+    request: DownloadRequest,
+) -> Result<DownloadTask, String> {
+    let root = resolve_index_repo_path(&request.index_repo_path)?;
+    validate_download_request(&request)?;
+    let manifest_path = root.join("manifests/files.jsonl");
+    let records = load_manifest_from_path(&manifest_path)?;
+    let selected = select_records_by_paths(&records, &request.paths)?;
+    let task_id = next_download_task_id();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    download_task_registry().insert(task_id.clone(), Arc::clone(&cancel_flag))?;
+
+    tauri::async_runtime::spawn_blocking({
+        let task_id = task_id.clone();
+        move || {
+            let sink = TauriProgressSink { app };
+            let _items = download_records_with_progress(
+                &root,
+                &request,
+                selected,
+                &[],
+                &task_id,
+                &sink,
+                cancel_flag.as_ref(),
+            );
+            let _ = download_task_registry().remove(&task_id);
+        }
+    });
+
+    Ok(DownloadTask { task_id })
+}
+
+#[tauri::command]
+pub async fn start_download(
+    app: AppHandle,
+    request: DownloadRequest,
+) -> Result<DownloadTask, String> {
+    tauri::async_runtime::spawn_blocking(move || start_download_blocking(app, request))
+        .await
+        .map_err(|error| format!("Start download worker failed: {}", error))?
+}
+
+#[tauri::command]
+pub async fn cancel_download(_app: AppHandle, task_id: String) -> Result<CommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        download_task_registry().cancel(&task_id)?;
+        Ok(CommandResult {
+            stdout: format!("Cancel requested for {}", task_id),
+            stderr: String::new(),
+        })
+    })
+    .await
+    .map_err(|error| format!("Cancel download worker failed: {}", error))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,6 +1438,51 @@ mod tests {
             sha,
             file_name
         )
+    }
+
+    #[test]
+    fn progress_event_payload_tracks_file_and_batch_counts() {
+        let event = download_progress_event(
+            "task-1",
+            "progress",
+            Some("资料/a.txt"),
+            2,
+            3,
+            0,
+            0,
+            1,
+            "streaming 资料/a.txt",
+        );
+
+        assert_eq!(event.task_id, "task-1");
+        assert_eq!(event.kind, "progress");
+        assert_eq!(event.path.as_deref(), Some("资料/a.txt"));
+        assert_eq!(event.bytes_written, 2);
+        assert_eq!(event.total_bytes, 3);
+        assert_eq!(event.completed_files, 0);
+        assert_eq!(event.failed_files, 0);
+        assert_eq!(event.total_files, 1);
+        assert_eq!(event.message, "streaming 资料/a.txt");
+    }
+
+    #[test]
+    fn download_task_commands_are_async_futures() {
+        fn assert_start_download_signature<F, Fut>(_function: F)
+        where
+            F: Fn(AppHandle, DownloadRequest) -> Fut,
+            Fut: std::future::Future<Output = Result<DownloadTask, String>>,
+        {
+        }
+
+        fn assert_cancel_download_signature<F, Fut>(_function: F)
+        where
+            F: Fn(AppHandle, String) -> Fut,
+            Fut: std::future::Future<Output = Result<CommandResult, String>>,
+        {
+        }
+
+        assert_start_download_signature(start_download);
+        assert_cancel_download_signature(cancel_download);
     }
 
     #[cfg(windows)]
@@ -1080,6 +1581,21 @@ esac
             "sh".to_string(),
             vec![fake_rclone.to_string_lossy().into_owned()],
         )
+    }
+
+    fn test_manifest_record(path: &str, file_name: &str) -> ManifestRecord {
+        ManifestRecord {
+            path: path.to_string(),
+            object_key: object_key_for_sha(
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                file_name,
+            ),
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string(),
+            size: 3,
+            storage: "r2".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "private".to_string(),
+        }
     }
 
     #[test]
@@ -1440,6 +1956,110 @@ esac
             .expect("verification should not overflow the stack");
 
         verify_result.expect("file should verify");
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn download_records_emits_streaming_progress_events() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-progress-download-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let (fake_rclone_command, fake_rclone_prefix_args) = write_success_fake_rclone(&temp_dir);
+        let request = DownloadRequest {
+            index_repo_path: temp_dir.to_string_lossy().into_owned(),
+            paths: vec!["资料/a.txt".to_string()],
+            download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
+            rclone_path: fake_rclone_command,
+            remote: "ebookneo-r2-readonly".to_string(),
+            bucket: "tyut-ebooks-collection-neo".to_string(),
+            download_jobs: 1,
+        };
+        let sink = RecordingProgressSink::default();
+        let cancel_flag = AtomicBool::new(false);
+
+        let results = download_records_with_progress(
+            &temp_dir,
+            &request,
+            vec![test_manifest_record("资料/a.txt", "a.txt")],
+            &fake_rclone_prefix_args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "task-progress",
+            &sink,
+            &cancel_flag,
+        );
+        let events = sink.events();
+
+        assert_eq!(results[0].status, "downloaded");
+        assert!(events.iter().any(|event| event.kind == "queued"));
+        assert!(events.iter().any(|event| event.kind == "started"));
+        assert!(events
+            .iter()
+            .any(|event| event.kind == "progress" && event.bytes_written == 3));
+        assert!(events.iter().any(|event| {
+            event.kind == "finished" && event.completed_files == 1 && event.total_files == 1
+        }));
+        assert!(events.iter().any(|event| event.kind == "completed"));
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn canceled_download_removes_partial_file_and_reports_canceled() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-cancel-download-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let request = DownloadRequest {
+            index_repo_path: temp_dir.to_string_lossy().into_owned(),
+            paths: vec!["资料/a.txt".to_string()],
+            download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
+            rclone_path: "rclone".to_string(),
+            remote: "ebookneo-r2-readonly".to_string(),
+            bucket: "tyut-ebooks-collection-neo".to_string(),
+            download_jobs: 1,
+        };
+        let record = test_manifest_record("资料/a.txt", "a.txt");
+        let destination = temp_dir.join("downloads").join("资料/a.txt");
+        fs::create_dir_all(
+            destination
+                .parent()
+                .expect("destination should have parent"),
+        )
+        .expect("download parent should be created");
+        let temp_download = temp_download_path(&destination);
+        fs::write(&temp_download, b"ab").expect("partial file should be written");
+        let sink = RecordingProgressSink::default();
+        let cancel_flag = AtomicBool::new(true);
+
+        let result = try_download_manifest_record_with_prefix_args(
+            &temp_dir,
+            &request,
+            &record,
+            &[],
+            "task-cancel",
+            &sink,
+            &cancel_flag,
+            0,
+            0,
+            1,
+        )
+        .expect("canceled download should produce an item result");
+
+        assert_eq!(result.status, "canceled");
+        assert!(
+            !temp_download.exists(),
+            "partial file should be removed on cancellation"
+        );
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
     }
 
