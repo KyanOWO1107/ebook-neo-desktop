@@ -1,0 +1,99 @@
+name: Release Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 0.1.0"
+        required: true
+        type: string
+  push:
+    tags:
+      - "ebook-neo-desktop-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "1"
+      RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            platform: windows-latest
+            args: "--bundles msi,nsis"
+          - name: Linux
+            platform: ubuntu-22.04
+            args: "--bundles deb,appimage"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Tauri Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Audit npm dependencies
+        run: npm audit --audit-level=moderate --registry=https://registry.npmjs.org
+
+      - name: Run Rust tests
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Build and upload bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.args }}
+          tagName: ${{ github.event_name == 'workflow_dispatch' && format('ebook-neo-desktop-v{0}', inputs.version) || github.ref_name }}
+          releaseName: "Ebook Neo Desktop ${{ env.RELEASE_VERSION }}"
+          releaseBody: |
+            Windows and Linux desktop builds for Ebook Neo.
+
+            Notes:
+            - macOS builds are intentionally not included in this workflow.
+            - rclone and the read-only R2 remote are still external collaborator prerequisites.
+            - These builds are unsigned; Windows users may see a SmartScreen warning.
+          releaseDraft: true
+          prerelease: false

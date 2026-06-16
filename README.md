@@ -90,6 +90,36 @@ $env:CARGO_BUILD_JOBS='1'; cargo check
 
 仓库包含 GitHub Actions CI。推送到 `main` 或创建面向 `main` 的 Pull Request 时，CI 会在 Ubuntu 上执行上述前端和 Rust 检查；它只做质量门禁，不生成安装包。
 
+## 发布流程
+
+Windows 和 Linux 安装包由 `.github/workflows/release.yml` 生成。这个 workflow 可以在 GitHub Actions 页面手动运行，也可以通过推送版本 tag 触发。
+
+手动运行时填写版本号，例如：
+
+```text
+0.1.0
+```
+
+Tag 触发时使用：
+
+```bash
+git tag ebook-neo-desktop-v0.1.0
+git push origin ebook-neo-desktop-v0.1.0
+```
+
+Release 会先创建为 draft，确认产物和说明后再手动发布。当前只构建：
+
+- Windows: `.msi` 和 NSIS `.exe`
+- Linux: `.deb` 和 `.AppImage`
+
+macOS 暂不包含在发布矩阵中。当前构建也不做代码签名，Windows 用户可能看到 SmartScreen 提示。Linux AppImage 首次运行前可能需要添加执行权限：
+
+```bash
+chmod a+x Ebook*.AppImage
+```
+
+发布包仍要求协作者自行安装并配置 `rclone` 只读 R2 remote；应用不会内置 R2 token 或 rclone 配置。
+
 ## 下载行为
 
 点击“开始下载”后，应用会在“索引仓库”目录执行等价命令：
