@@ -8,7 +8,7 @@
 - 按根目录浏览资料统计。
 - 搜索、勾选单个文件或当前列表。
 - 通过内置 Tauri 后端调用 `rclone cat` 或 `rclone copyto` 从 Cloudflare R2 只读 remote 下载。
-- 保存索引仓库、下载目录、rclone、R2 remote/bucket、下载并发数、大文件阈值/线程数和亮/暗主题设置。
+- 在“设置”页保存索引仓库、下载目录、rclone、R2 remote/bucket、下载并发数、大文件阈值/线程数、大文件进度展示和亮/暗主题设置。
 - 通过 `git pull --ff-only` 从 GitHub 更新资源表，然后重新加载 manifest。
 
 客户端本身作为独立仓库维护。它通过“索引仓库”设置指向本地的 `TYUT-ebooks-collection-neo` 克隆目录，只从该目录读取资源表并执行 Git 更新；下载不再依赖索引仓库中的 Python 工具。
@@ -41,16 +41,17 @@ bucket: tyut-ebooks-collection-neo
 jobs: 4
 large file threshold: 20 MiB
 large file streams: 8
+show large file progress: true
 theme: light
 ```
 
-如果你的 GUI 仓库和索引仓库不是并排目录，请在应用右侧设置里把“索引仓库”改成绝对路径，例如：
+如果你的 GUI 仓库和索引仓库不是并排目录，请在应用的“设置”页把“索引仓库”改成绝对路径，例如：
 
 ```text
 path\to\TYUT-ebooks-collection-neo
 ```
 
-如果 Windows 上 `rclone` 没有进入 PATH，可以在应用右侧设置里填完整路径，例如：
+如果 Windows 上 `rclone` 没有进入 PATH，可以在“设置”页填完整路径，例如：
 
 ```text
 your-rclone-path\rclone.exe
@@ -139,11 +140,13 @@ rclone copyto ebookneo-r2-readonly:tyut-ebooks-collection-neo/<object_key> downl
 
 `大文件阈值`控制何时从 `cat` 切换为 `copyto` 多线程路径，单位为 MiB，默认值是 20。`大文件线程`控制单个大文件的 rclone 多线程流数量，默认值是 8，范围为 1 到 16。它和文件级 `并发` 是两个不同设置：前者加速单个大文件，后者控制同时下载多少个文件。
 
+`大文件下载进度展示`默认开启。开启时，`copyto` 大文件路径会轮询目标 `.ebook-neo-part` 临时文件的当前大小，并用它和 manifest 中的文件大小比较来估算进度；关闭后，大文件只显示“下载中”，直到完成、失败或取消。这个估算不解析 rclone 日志，最终仍以文件大小和 `sha256` 校验结果为准。
+
 资料页保留搜索、选择和整体进度摘要，只显示完成数量/总数，不展开完整逐文件消息。切到“下载”页后，可以看到本次任务的稳定队列：每个选中文件都会固定占一行，后续进度、完成、失败或取消事件只更新对应行，不会按事件先后跳动排序。
 
 单个文件失败不会阻止整批任务继续，失败项会保留在下载页中，可点击“重试失败”只重试这些路径。
 
-下载过程中，右侧面板会显示当前文件的字节级进度、整体完成数量和取消按钮。`cat` 路径会显示实时字节进度；`copyto` 大文件路径当前显示开始、完成或失败状态。取消会停止后续排队文件，并让后端尽量终止当前 rclone 进程；已经写入但未校验完成的 `.ebook-neo-part` 临时文件会被清理。
+下载过程中，右侧面板会显示当前文件的字节级进度、整体完成数量和取消按钮。`cat` 路径会显示实时字节进度；`copyto` 大文件路径按“设置”页中的开关决定是否显示估算字节进度。取消会停止后续排队文件，并让后端尽量终止当前 rclone 进程；已经写入但未校验完成的 `.ebook-neo-part` 临时文件会被清理。
 
 “检查 R2”会运行只读的 rclone 列目录检查，用于确认当前 `rclone`、Remote 和 Bucket 设置是否可用。“打开目录”会创建并打开当前下载目录。
 
