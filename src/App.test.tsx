@@ -100,6 +100,7 @@ describe("App", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getAllByText("资料/数据结构/a.pdf").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
 
     const downloadRoot = screen.getByLabelText("下载目录") as HTMLInputElement;
     const indexRepoPath = screen.getByLabelText("索引仓库") as HTMLInputElement;
@@ -123,6 +124,60 @@ describe("App", () => {
 
     fireEvent.change(largeFileStreams, { target: { value: "12" } });
     expect(largeFileStreams.value).toBe("12");
+  });
+
+  it("shows persistent configuration on the settings view instead of the download queue panel", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+
+    const downloadPanel = screen.getByLabelText("下载队列");
+    expect(downloadPanel.textContent).not.toContain("索引仓库");
+    expect(downloadPanel.textContent).not.toContain("大文件阈值");
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+
+    expect(screen.getByRole("button", { name: "设置" }).getAttribute("data-active")).toBe("true");
+    expect(screen.getByLabelText("索引仓库")).toBeTruthy();
+    expect(screen.getByLabelText("下载目录")).toBeTruthy();
+    expect(screen.getByLabelText("rclone")).toBeTruthy();
+    expect(screen.getByLabelText("Remote")).toBeTruthy();
+    expect(screen.getByLabelText("Bucket")).toBeTruthy();
+    expect(screen.getByLabelText("并发")).toBeTruthy();
+    expect(screen.getByLabelText("大文件阈值")).toBeTruthy();
+    expect(screen.getByLabelText("大文件线程")).toBeTruthy();
+    expect(screen.getByLabelText("大文件下载进度展示")).toBeTruthy();
+    expect(screen.getByLabelText("暗色模式")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "保存设置" })).toBeTruthy();
+  });
+
+  it("sends the saved large-file progress toggle with download requests", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByLabelText("大文件下载进度展示"));
+    fireEvent.click(screen.getByRole("button", { name: "资料" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /资料\/数据结构\/a\.pdf/ }));
+    fireEvent.click(screen.getByRole("button", { name: "开始下载" }));
+
+    await waitFor(() =>
+      expect(mockedInvoke()).toHaveBeenCalledWith("start_download", {
+        request: {
+          indexRepoPath: defaultAppSettings.indexRepoPath,
+          paths: ["资料/数据结构/a.pdf"],
+          downloadRoot: defaultAppSettings.downloadRoot,
+          rclonePath: defaultAppSettings.rclonePath,
+          remote: defaultAppSettings.remote,
+          bucket: defaultAppSettings.bucket,
+          downloadJobs: defaultAppSettings.downloadJobs,
+          largeFileThresholdMiB: defaultAppSettings.largeFileThresholdMiB,
+          largeFileStreams: defaultAppSettings.largeFileStreams,
+          showLargeFileProgress: false,
+        },
+      }),
+    );
   });
 
   it("checks the configured rclone remote from the download panel", async () => {

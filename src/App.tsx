@@ -88,7 +88,7 @@ function App() {
   const [activeDownloadTaskId, setActiveDownloadTaskId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgressEvent | null>(null);
   const [downloadSettings, setDownloadSettings] = useState<AppSettings>(defaultAppSettings);
-  const [activeView, setActiveView] = useState<"resources" | "downloads">("resources");
+  const [activeView, setActiveView] = useState<"resources" | "downloads" | "settings">("resources");
   const activeDownloadTaskIdRef = useRef<string | null>(null);
   const isAwaitingDownloadTaskRef = useRef(false);
 
@@ -467,6 +467,160 @@ function App() {
           .map((record) => `'${record.path}'`)
           .join(" ")}${selectedRecords.length > 3 ? " ..." : ""} (jobs=${downloadSettings.downloadJobs}, large-streams=${downloadSettings.largeFileStreams})`;
 
+  const settingsPanel = (
+    <div className="table-panel settings-view">
+      <div className="panel-head">
+        <div>
+          <h2>设置</h2>
+          <p>{status}</p>
+        </div>
+        <div className="selection-actions">
+          <button type="button" onClick={checkRcloneRemote} disabled={isCheckingRemote}>
+            检查 R2
+          </button>
+          <button type="button" onClick={openDownloadRoot} disabled={isOpeningDownloadRoot}>
+            打开目录
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-grid" aria-label="下载设置">
+        <label className="settings-wide">
+          <span>索引仓库</span>
+          <input
+            value={downloadSettings.indexRepoPath}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setDownloadSettings((settings) => ({ ...settings, indexRepoPath: value }));
+            }}
+          />
+        </label>
+        <label className="settings-wide">
+          <span>下载目录</span>
+          <input
+            value={downloadSettings.downloadRoot}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setDownloadSettings((settings) => ({ ...settings, downloadRoot: value }));
+            }}
+          />
+        </label>
+        <label className="settings-wide">
+          <span>rclone</span>
+          <input
+            value={downloadSettings.rclonePath}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setDownloadSettings((settings) => ({ ...settings, rclonePath: value }));
+            }}
+          />
+        </label>
+        <label className="settings-wide">
+          <span>Remote</span>
+          <input
+            value={downloadSettings.remote}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setDownloadSettings((settings) => ({ ...settings, remote: value }));
+            }}
+          />
+        </label>
+        <label className="settings-wide">
+          <span>Bucket</span>
+          <input
+            value={downloadSettings.bucket}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setDownloadSettings((settings) => ({ ...settings, bucket: value }));
+            }}
+          />
+        </label>
+        <label>
+          <span>并发</span>
+          <input
+            min={1}
+            max={16}
+            type="number"
+            value={downloadSettings.downloadJobs}
+            onChange={(event) => {
+              const value = Number(event.currentTarget.value);
+              setDownloadSettings((settings) => ({
+                ...settings,
+                downloadJobs: clampDownloadJobs(value),
+              }));
+            }}
+          />
+        </label>
+        <label>
+          <span>大文件阈值</span>
+          <input
+            min={1}
+            max={4096}
+            type="number"
+            value={downloadSettings.largeFileThresholdMiB}
+            onChange={(event) => {
+              const value = Number(event.currentTarget.value);
+              setDownloadSettings((settings) => ({
+                ...settings,
+                largeFileThresholdMiB: clampLargeFileThresholdMiB(value),
+              }));
+            }}
+          />
+        </label>
+        <label>
+          <span>大文件线程</span>
+          <input
+            min={1}
+            max={16}
+            type="number"
+            value={downloadSettings.largeFileStreams}
+            onChange={(event) => {
+              const value = Number(event.currentTarget.value);
+              setDownloadSettings((settings) => ({
+                ...settings,
+                largeFileStreams: clampLargeFileStreams(value),
+              }));
+            }}
+          />
+        </label>
+        <label className="settings-switch settings-wide">
+          <input
+            type="checkbox"
+            checked={downloadSettings.showLargeFileProgress}
+            onChange={(event) => {
+              const checked = event.currentTarget.checked;
+              setDownloadSettings((settings) => ({ ...settings, showLargeFileProgress: checked }));
+            }}
+          />
+          <span>大文件下载进度展示</span>
+        </label>
+        <label className="settings-switch settings-wide">
+          <input
+            type="checkbox"
+            checked={downloadSettings.theme === "dark"}
+            onChange={(event) => {
+              const checked = event.currentTarget.checked;
+              setDownloadSettings((settings) => ({ ...settings, theme: checked ? "dark" : "light" }));
+            }}
+          />
+          <span>暗色模式</span>
+        </label>
+      </div>
+
+      <div className="settings-actions">
+        <button
+          className="primary-action"
+          type="button"
+          onClick={() => saveCurrentSettings()}
+          disabled={isSavingSettings}
+        >
+          <Save size={16} />
+          {isSavingSettings ? "保存中" : "保存设置"}
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <main className="app-shell" data-theme={themeAttribute(downloadSettings.theme)}>
       <aside className="sidebar" aria-label="资料分类">
@@ -551,6 +705,13 @@ function App() {
               onClick={() => setActiveView("downloads")}
             >
               下载
+            </button>
+            <button
+              type="button"
+              data-active={activeView === "settings"}
+              onClick={() => setActiveView("settings")}
+            >
+              设置
             </button>
           </div>
           <button
@@ -640,7 +801,7 @@ function App() {
                 ))}
               </div>
             </div>
-          ) : (
+          ) : activeView === "downloads" ? (
             <div className="table-panel downloads-view">
               <div className="panel-head">
                 <div>
@@ -687,6 +848,8 @@ function App() {
                 ))}
               </div>
             </div>
+          ) : (
+            settingsPanel
           )}
 
           <aside className="download-panel" aria-label="下载队列">
@@ -704,115 +867,6 @@ function App() {
               {selectedRecords.length === 0 && <p className="empty-state">从左侧列表选择文件后开始下载。</p>}
               {selectedRecords.length > 8 && <p className="empty-state">另有 {selectedRecords.length - 8} 个文件已选中。</p>}
             </div>
-            <div className="settings-grid" aria-label="下载设置">
-              <label className="settings-wide">
-                <span>索引仓库</span>
-                <input
-                  value={downloadSettings.indexRepoPath}
-                  onChange={(event) => {
-                    const value = event.currentTarget.value;
-                    setDownloadSettings((settings) => ({ ...settings, indexRepoPath: value }));
-                  }}
-                />
-              </label>
-              <label className="settings-wide">
-                <span>下载目录</span>
-                <input
-                  value={downloadSettings.downloadRoot}
-                  onChange={(event) => {
-                    const value = event.currentTarget.value;
-                    setDownloadSettings((settings) => ({ ...settings, downloadRoot: value }));
-                  }}
-                />
-              </label>
-              <label className="settings-wide">
-                <span>rclone</span>
-                <input
-                  value={downloadSettings.rclonePath}
-                  onChange={(event) => {
-                    const value = event.currentTarget.value;
-                    setDownloadSettings((settings) => ({ ...settings, rclonePath: value }));
-                  }}
-                />
-              </label>
-              <label className="settings-wide">
-                <span>Remote</span>
-                <input
-                  value={downloadSettings.remote}
-                  onChange={(event) => {
-                    const value = event.currentTarget.value;
-                    setDownloadSettings((settings) => ({ ...settings, remote: value }));
-                  }}
-                />
-              </label>
-              <label className="settings-wide">
-                <span>Bucket</span>
-                <input
-                  value={downloadSettings.bucket}
-                  onChange={(event) => {
-                    const value = event.currentTarget.value;
-                    setDownloadSettings((settings) => ({ ...settings, bucket: value }));
-                  }}
-                />
-              </label>
-              <label>
-                <span>并发</span>
-                <input
-                  min={1}
-                  max={16}
-                  type="number"
-                  value={downloadSettings.downloadJobs}
-                  onChange={(event) => {
-                    const value = Number(event.currentTarget.value);
-                    setDownloadSettings((settings) => ({
-                      ...settings,
-                      downloadJobs: clampDownloadJobs(value),
-                    }));
-                  }}
-                />
-              </label>
-              <label>
-                <span>大文件阈值</span>
-                <input
-                  min={1}
-                  max={4096}
-                  type="number"
-                  value={downloadSettings.largeFileThresholdMiB}
-                  onChange={(event) => {
-                    const value = Number(event.currentTarget.value);
-                    setDownloadSettings((settings) => ({
-                      ...settings,
-                      largeFileThresholdMiB: clampLargeFileThresholdMiB(value),
-                    }));
-                  }}
-                />
-              </label>
-              <label>
-                <span>大文件线程</span>
-                <input
-                  min={1}
-                  max={16}
-                  type="number"
-                  value={downloadSettings.largeFileStreams}
-                  onChange={(event) => {
-                    const value = Number(event.currentTarget.value);
-                    setDownloadSettings((settings) => ({
-                      ...settings,
-                      largeFileStreams: clampLargeFileStreams(value),
-                    }));
-                  }}
-                />
-              </label>
-            </div>
-            <button
-              className="secondary-action"
-              type="button"
-              onClick={() => saveCurrentSettings()}
-              disabled={isSavingSettings}
-            >
-              <Save size={16} />
-              {isSavingSettings ? "保存中" : "保存设置"}
-            </button>
             <div className="utility-actions">
               <button
                 className="secondary-action"
