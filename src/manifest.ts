@@ -33,6 +33,7 @@ export type AppSettings = {
   downloadJobs: number;
   largeFileThresholdMiB: number;
   largeFileStreams: number;
+  showLargeFileProgress: boolean;
   theme: ThemeMode;
 };
 
@@ -46,6 +47,7 @@ export type DownloadRequestPayload = {
   downloadJobs: number;
   largeFileThresholdMiB: number;
   largeFileStreams: number;
+  showLargeFileProgress: boolean;
 };
 
 export const defaultAppSettings: AppSettings = {
@@ -57,6 +59,7 @@ export const defaultAppSettings: AppSettings = {
   downloadJobs: 4,
   largeFileThresholdMiB: 20,
   largeFileStreams: 8,
+  showLargeFileProgress: true,
   theme: "light",
 };
 
@@ -71,6 +74,7 @@ export function buildDownloadRequestPayload(settings: AppSettings, paths: string
     downloadJobs: settings.downloadJobs,
     largeFileThresholdMiB: settings.largeFileThresholdMiB,
     largeFileStreams: settings.largeFileStreams,
+    showLargeFileProgress: settings.showLargeFileProgress,
   };
 }
 
@@ -108,6 +112,10 @@ export function mergeAppSettings(settings: Partial<AppSettings>): AppSettings {
       settings.largeFileThresholdMiB ?? defaultAppSettings.largeFileThresholdMiB,
     ),
     largeFileStreams: clampLargeFileStreams(settings.largeFileStreams ?? defaultAppSettings.largeFileStreams),
+    showLargeFileProgress:
+      typeof settings.showLargeFileProgress === "boolean"
+        ? settings.showLargeFileProgress
+        : defaultAppSettings.showLargeFileProgress,
     theme: themeAttribute(settings.theme ?? defaultAppSettings.theme),
   };
 }

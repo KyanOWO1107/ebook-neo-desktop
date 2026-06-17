@@ -136,6 +136,7 @@ describe("manifest helpers", () => {
   it("defaults and clamps large file download settings", () => {
     expect(defaultAppSettings.largeFileThresholdMiB).toBe(20);
     expect(defaultAppSettings.largeFileStreams).toBe(8);
+    expect(defaultAppSettings.showLargeFileProgress).toBe(true);
     expect(clampLargeFileThresholdMiB(0)).toBe(1);
     expect(clampLargeFileThresholdMiB(64)).toBe(64);
     expect(clampLargeFileThresholdMiB(9000)).toBe(4096);
@@ -146,6 +147,9 @@ describe("manifest helpers", () => {
       largeFileThresholdMiB: 1,
       largeFileStreams: 16,
     });
+    expect(mergeAppSettings({ showLargeFileProgress: false })).toMatchObject({
+      showLargeFileProgress: false,
+    });
   });
 
   it("builds the Tauri download request with the MiB field spelling expected by Rust", () => {
@@ -155,6 +159,7 @@ describe("manifest helpers", () => {
       paths: ["资料/数据结构/a.pdf"],
       largeFileThresholdMiB: 20,
       largeFileStreams: 8,
+      showLargeFileProgress: true,
     });
     expect(Object.keys(request)).not.toContain("largeFileThresholdMib");
   });

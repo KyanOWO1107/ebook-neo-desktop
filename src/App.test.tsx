@@ -178,6 +178,7 @@ describe("App", () => {
           downloadJobs: defaultAppSettings.downloadJobs,
           largeFileThresholdMiB: defaultAppSettings.largeFileThresholdMiB,
           largeFileStreams: defaultAppSettings.largeFileStreams,
+          showLargeFileProgress: defaultAppSettings.showLargeFileProgress,
         },
       }),
     );
@@ -223,6 +224,7 @@ describe("App", () => {
           downloadJobs: defaultAppSettings.downloadJobs,
           largeFileThresholdMiB: defaultAppSettings.largeFileThresholdMiB,
           largeFileStreams: defaultAppSettings.largeFileStreams,
+          showLargeFileProgress: defaultAppSettings.showLargeFileProgress,
         },
       }),
     );
