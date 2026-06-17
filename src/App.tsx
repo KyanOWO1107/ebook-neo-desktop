@@ -7,7 +7,6 @@ import {
   FolderOpen,
   Moon,
   RefreshCw,
-  Save,
   Search,
   Square,
   Sun,
@@ -475,6 +474,9 @@ function App() {
           <p>{status}</p>
         </div>
         <div className="selection-actions">
+          <button type="button" onClick={() => saveCurrentSettings()} disabled={isSavingSettings}>
+            {isSavingSettings ? "保存中" : "保存设置"}
+          </button>
           <button type="button" onClick={checkRcloneRemote} disabled={isCheckingRemote}>
             检查 R2
           </button>
@@ -505,7 +507,7 @@ function App() {
             }}
           />
         </label>
-        <label className="settings-wide">
+        <label>
           <span>rclone</span>
           <input
             value={downloadSettings.rclonePath}
@@ -515,7 +517,7 @@ function App() {
             }}
           />
         </label>
-        <label className="settings-wide">
+        <label>
           <span>Remote</span>
           <input
             value={downloadSettings.remote}
@@ -525,7 +527,7 @@ function App() {
             }}
           />
         </label>
-        <label className="settings-wide">
+        <label>
           <span>Bucket</span>
           <input
             value={downloadSettings.bucket}
@@ -607,17 +609,6 @@ function App() {
         </label>
       </div>
 
-      <div className="settings-actions">
-        <button
-          className="primary-action"
-          type="button"
-          onClick={() => saveCurrentSettings()}
-          disabled={isSavingSettings}
-        >
-          <Save size={16} />
-          {isSavingSettings ? "保存中" : "保存设置"}
-        </button>
-      </div>
     </div>
   );
 
