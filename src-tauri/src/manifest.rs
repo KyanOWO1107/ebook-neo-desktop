@@ -9,10 +9,12 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const LARGE_FILE_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 static DOWNLOAD_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
 static DOWNLOAD_TASKS: OnceLock<DownloadTaskRegistry> = OnceLock::new();
 
@@ -109,6 +111,8 @@ pub struct DownloadRequest {
     #[serde(rename = "largeFileThresholdMiB", alias = "largeFileThresholdMib")]
     pub large_file_threshold_mib: u16,
     pub large_file_streams: u16,
+    #[serde(default = "default_true")]
+    pub show_large_file_progress: bool,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -160,6 +164,8 @@ pub struct AppSettings {
     #[serde(rename = "largeFileThresholdMiB", alias = "largeFileThresholdMib")]
     pub large_file_threshold_mib: u16,
     pub large_file_streams: u16,
+    #[serde(default = "default_true")]
+    pub show_large_file_progress: bool,
     pub theme: String,
 }
 
@@ -174,6 +180,7 @@ impl Default for AppSettings {
             download_jobs: 4,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
             theme: "light".to_string(),
         }
     }
@@ -181,6 +188,10 @@ impl Default for AppSettings {
 
 fn default_index_repo_path() -> String {
     "../TYUT-ebooks-collection-neo".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -1209,6 +1220,8 @@ fn run_rclone_copyto_download(
         .take()
         .ok_or_else(|| format!("Failed to capture rclone stderr for {}", record.path))?;
     let stderr_thread = thread::spawn(move || read_pipe_to_string(stderr));
+    let mut next_progress_at = Instant::now();
+    let mut last_progress_bytes = 0;
 
     loop {
         if child
@@ -1217,6 +1230,26 @@ fn run_rclone_copyto_download(
             .is_some()
         {
             break;
+        }
+        if request.show_large_file_progress && Instant::now() >= next_progress_at {
+            if let Ok(metadata) = fs::metadata(temp_path) {
+                let bytes_written = metadata.len().min(record.size);
+                if bytes_written > 0 && bytes_written != last_progress_bytes {
+                    last_progress_bytes = bytes_written;
+                    progress_sink.emit(download_progress_event(
+                        task_id,
+                        "progress",
+                        Some(&record.path),
+                        bytes_written,
+                        record.size,
+                        completed_files,
+                        failed_files,
+                        total_files,
+                        &format!("copying {}", record.path),
+                    ));
+                }
+            }
+            next_progress_at = Instant::now() + LARGE_FILE_PROGRESS_INTERVAL;
         }
         if cancel_flag.load(Ordering::SeqCst) {
             let _ = child.kill();
@@ -1881,6 +1914,87 @@ PY
         )
     }
 
+    #[cfg(windows)]
+    fn write_slow_copyto_fake_rclone(temp_dir: &Path) -> (String, Vec<String>) {
+        let fake_rclone = temp_dir.join("fake-slow-copyto-rclone.ps1");
+        let marker = temp_dir.join("slow-copyto.args");
+        fs::write(
+            &fake_rclone,
+            format!(
+                r#"
+[IO.File]::WriteAllText('{}', ($args -join "`n"), [Text.Encoding]::UTF8)
+$destination = $args[2]
+$chunk = [byte[]]::new(8192)
+for ($i = 0; $i -lt $chunk.Length; $i++) {{ $chunk[$i] = 97 }}
+$stream = [IO.File]::Open($destination, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+try {{
+  for ($i = 0; $i -lt 128; $i++) {{ $stream.Write($chunk, 0, $chunk.Length) }}
+}} finally {{
+  $stream.Dispose()
+}}
+Start-Sleep -Milliseconds 900
+$stream = [IO.File]::Open($destination, [IO.FileMode]::Append, [IO.FileAccess]::Write)
+try {{
+  for ($i = 0; $i -lt 256; $i++) {{ $stream.Write($chunk, 0, $chunk.Length) }}
+}} finally {{
+  $stream.Dispose()
+}}
+"#,
+                marker
+                    .to_str()
+                    .expect("marker path should be utf-8")
+                    .replace('\'', "''")
+            ),
+        )
+        .expect("fake slow copyto rclone should be written");
+
+        (
+            "powershell".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                fake_rclone
+                    .to_str()
+                    .expect("fake rclone path should be utf-8")
+                    .to_string(),
+            ],
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn write_slow_copyto_fake_rclone(temp_dir: &Path) -> (String, Vec<String>) {
+        let fake_rclone = temp_dir.join("fake-slow-copyto-rclone.sh");
+        let marker = temp_dir.join("slow-copyto.args");
+        fs::write(
+            &fake_rclone,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$@" > '{}'
+python3 - "$3" <<'PY'
+import sys
+import time
+with open(sys.argv[1], 'wb') as f:
+    f.write(b'a' * (1024 * 1024))
+    f.flush()
+time.sleep(0.9)
+with open(sys.argv[1], 'ab') as f:
+    f.write(b'a' * (2 * 1024 * 1024))
+    f.flush()
+PY
+"#,
+                marker.to_string_lossy()
+            ),
+        )
+        .expect("fake slow copyto rclone should be written");
+
+        (
+            "sh".to_string(),
+            vec![fake_rclone.to_string_lossy().into_owned()],
+        )
+    }
+
     #[cfg(not(windows))]
     fn write_mixed_result_fake_rclone(temp_dir: &Path) -> (String, Vec<String>) {
         let fake_rclone = temp_dir.join("fake-rclone.sh");
@@ -2352,6 +2466,7 @@ esac
             download_jobs: 1,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
         let sink = RecordingProgressSink::default();
         let cancel_flag = AtomicBool::new(false);
@@ -2403,6 +2518,7 @@ esac
             download_jobs: 1,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
         let record = test_manifest_record("资料/a.txt", "a.txt");
         let destination = temp_dir.join("downloads").join("资料/a.txt");
@@ -2459,6 +2575,7 @@ esac
             download_jobs: 1,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
         let sink = RecordingProgressSink::default();
         let cancel_flag = AtomicBool::new(true);
@@ -2509,6 +2626,7 @@ esac
             download_jobs: 1,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
         let sink = RecordingProgressSink::default();
         let cancel_flag = AtomicBool::new(true);
@@ -2558,6 +2676,7 @@ esac
             download_jobs: 1,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
         let record = ManifestRecord {
             path: "资料/a.txt".to_string(),
@@ -2627,6 +2746,7 @@ esac
             download_jobs: 1,
             large_file_threshold_mib: 1,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
         let record = ManifestRecord {
             path: "资料/large.txt".to_string(),
@@ -2670,6 +2790,132 @@ esac
     }
 
     #[test]
+    fn large_file_progress_emits_temp_file_progress_when_enabled() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-copyto-progress-enabled-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let (fake_rclone_command, fake_rclone_prefix_args) =
+            write_slow_copyto_fake_rclone(&temp_dir);
+        let large_bytes = vec![b'a'; 3 * 1024 * 1024];
+        let large_sha256 = hex_sha256(&Sha256::digest(&large_bytes));
+        let request = DownloadRequest {
+            index_repo_path: temp_dir.to_string_lossy().into_owned(),
+            paths: vec!["资料/large.txt".to_string()],
+            download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
+            rclone_path: fake_rclone_command,
+            remote: "ebookneo-r2-readonly".to_string(),
+            bucket: "tyut-ebooks-collection-neo".to_string(),
+            download_jobs: 1,
+            large_file_threshold_mib: 1,
+            large_file_streams: 8,
+            show_large_file_progress: true,
+        };
+        let record = ManifestRecord {
+            path: "资料/large.txt".to_string(),
+            object_key: object_key_for_sha(&large_sha256, "large.txt"),
+            sha256: large_sha256,
+            size: 3 * 1024 * 1024,
+            storage: "r2".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "private".to_string(),
+        };
+        let sink = RecordingProgressSink::default();
+        let cancel_flag = AtomicBool::new(false);
+
+        let results = download_records_with_progress(
+            &temp_dir,
+            &request,
+            vec![record],
+            &fake_rclone_prefix_args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "task-copyto-progress-enabled",
+            &sink,
+            &cancel_flag,
+        );
+        let events = sink.events();
+
+        assert_eq!(results[0].status, "downloaded", "{}", results[0].message);
+        assert!(events.iter().any(|event| {
+            event.kind == "progress"
+                && event.path.as_deref() == Some("资料/large.txt")
+                && event.bytes_written > 0
+                && event.bytes_written < 3 * 1024 * 1024
+        }));
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn large_file_progress_skips_temp_file_progress_when_disabled() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-copyto-progress-disabled-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let (fake_rclone_command, fake_rclone_prefix_args) =
+            write_slow_copyto_fake_rclone(&temp_dir);
+        let large_bytes = vec![b'a'; 3 * 1024 * 1024];
+        let large_sha256 = hex_sha256(&Sha256::digest(&large_bytes));
+        let request = DownloadRequest {
+            index_repo_path: temp_dir.to_string_lossy().into_owned(),
+            paths: vec!["资料/large.txt".to_string()],
+            download_root: temp_dir.join("downloads").to_string_lossy().into_owned(),
+            rclone_path: fake_rclone_command,
+            remote: "ebookneo-r2-readonly".to_string(),
+            bucket: "tyut-ebooks-collection-neo".to_string(),
+            download_jobs: 1,
+            large_file_threshold_mib: 1,
+            large_file_streams: 8,
+            show_large_file_progress: false,
+        };
+        let record = ManifestRecord {
+            path: "资料/large.txt".to_string(),
+            object_key: object_key_for_sha(&large_sha256, "large.txt"),
+            sha256: large_sha256,
+            size: 3 * 1024 * 1024,
+            storage: "r2".to_string(),
+            updated_at: "2026-06-12".to_string(),
+            visibility: "private".to_string(),
+        };
+        let sink = RecordingProgressSink::default();
+        let cancel_flag = AtomicBool::new(false);
+
+        let results = download_records_with_progress(
+            &temp_dir,
+            &request,
+            vec![record],
+            &fake_rclone_prefix_args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "task-copyto-progress-disabled",
+            &sink,
+            &cancel_flag,
+        );
+        let events = sink.events();
+
+        assert_eq!(results[0].status, "downloaded", "{}", results[0].message);
+        assert!(!events.iter().any(|event| {
+            event.kind == "progress" && event.path.as_deref() == Some("资料/large.txt")
+        }));
+        assert!(events.iter().any(|event| {
+            event.kind == "finished"
+                && event.path.as_deref() == Some("资料/large.txt")
+                && event.bytes_written == 3 * 1024 * 1024
+        }));
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
     fn download_records_reports_failures_without_stopping_the_batch() {
         let temp_dir = std::env::temp_dir().join(format!(
             "ebook-neo-structured-download-test-{}",
@@ -2692,6 +2938,7 @@ esac
             download_jobs: 1,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
         let records = vec![
             ManifestRecord {
@@ -2750,6 +2997,7 @@ esac
             download_jobs: 4,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
 
         validate_download_request(&request).expect("download request should validate");
@@ -2774,6 +3022,7 @@ esac
             download_jobs: 1,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
 
         let future = assert_download_future(download_selected(request));
@@ -2854,6 +3103,7 @@ esac
             download_jobs: 4,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
 
         let error = validate_download_request(&request).expect_err("empty selection should fail");
@@ -2873,6 +3123,7 @@ esac
             download_jobs: 17,
             large_file_threshold_mib: 20,
             large_file_streams: 8,
+            show_large_file_progress: true,
         };
 
         let error = validate_download_request(&request).expect_err("too many jobs should fail");
@@ -2892,6 +3143,7 @@ esac
         assert_eq!(settings.download_jobs, 4);
         assert_eq!(settings.large_file_threshold_mib, 20);
         assert_eq!(settings.large_file_streams, 8);
+        assert!(settings.show_large_file_progress);
         assert_eq!(settings.theme, "light");
     }
 
@@ -2906,12 +3158,14 @@ esac
             "bucket": "tyut-ebooks-collection-neo",
             "downloadJobs": 4,
             "largeFileThresholdMiB": 20,
-            "largeFileStreams": 8
+            "largeFileStreams": 8,
+            "showLargeFileProgress": true
         }))
         .expect("frontend request spelling should deserialize");
 
         assert_eq!(request.large_file_threshold_mib, 20);
         assert_eq!(request.large_file_streams, 8);
+        assert!(request.show_large_file_progress);
     }
 
     #[test]
@@ -2924,6 +3178,12 @@ esac
             Some(20),
         );
         assert!(value.get("largeFileThresholdMib").is_none());
+        assert_eq!(
+            value
+                .get("showLargeFileProgress")
+                .and_then(|item| item.as_bool()),
+            Some(true),
+        );
 
         let mut legacy_value = value;
         let legacy_object = legacy_value
@@ -2957,6 +3217,7 @@ esac
             download_jobs: 6,
             large_file_threshold_mib: 32,
             large_file_streams: 12,
+            show_large_file_progress: false,
             theme: "dark".to_string(),
         };
 
