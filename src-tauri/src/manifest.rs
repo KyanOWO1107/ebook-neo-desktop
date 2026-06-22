@@ -2484,8 +2484,15 @@ esac
         fs::create_dir_all(&outside).expect("outside dir should be created");
         symlink(&outside, index_root.join("downloads/link")).expect("symlink should be created");
 
-        let error = build_destination_path(&index_root, "downloads", "link/secret.txt")
-            .expect_err("symlink escape should be rejected");
+        let destination = build_destination_path(&index_root, "downloads", "link/secret.txt")
+            .expect("path construction should stay lexical");
+        let error = ensure_destination_parent_inside_download_root(
+            &index_root,
+            "downloads",
+            &destination,
+            "link/secret.txt",
+        )
+        .expect_err("symlink escape should be rejected");
 
         assert_eq!(
             error,
