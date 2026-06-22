@@ -61,6 +61,14 @@ show large file progress: true
 theme: light
 ```
 
+设置会保存到 Tauri 的应用配置目录。Windows 安装版当前路径为：
+
+```text
+%APPDATA%\work.kyanet.ebookneo\settings.json
+```
+
+旧测试版如果使用过 `com.tyutebooks.neo` 作为 identifier，旧设置仍会留在 `%APPDATA%\com.tyutebooks.neo\settings.json`，不会自动迁移。
+
 如果你的 GUI 仓库和索引仓库不是并排目录，请在应用的“设置”页把“索引仓库”改成绝对路径，例如：
 
 ```text
@@ -136,6 +144,8 @@ Release 会先创建为 draft，确认产物和说明后再手动发布。当前
 
 - Windows: `.msi` 和 NSIS `.exe`
 - Linux: `.deb` 和 `.AppImage`
+
+Windows 安装器配置了简体中文和英文语言：NSIS 使用 `SimpChinese`/`English`，MSI/WiX 使用 `zh-CN`/`en-US`。
 
 macOS 暂不包含在发布矩阵中。当前构建也不做代码签名，Windows 用户可能看到 SmartScreen 提示。Linux AppImage 首次运行前可能需要添加执行权限：
 

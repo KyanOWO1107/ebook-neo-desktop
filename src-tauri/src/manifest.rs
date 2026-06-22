@@ -13,11 +13,28 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 static DOWNLOAD_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
 static DOWNLOAD_TASKS: OnceLock<DownloadTaskRegistry> = OnceLock::new();
 
 #[cfg(test)]
 const PRODUCTION_CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost";
+
+#[cfg(windows)]
+fn windows_no_window_creation_flags() -> u32 {
+    CREATE_NO_WINDOW
+}
+
+fn new_hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_no_window_creation_flags());
+    }
+    command
+}
 
 #[derive(Debug, Deserialize)]
 struct RawManifestRecord {
@@ -1192,7 +1209,7 @@ fn run_rclone_cat_download(
 ) -> Result<(), String> {
     let args = build_rclone_cat_args(&request.remote, &request.bucket, record)?;
 
-    let mut child = Command::new(&request.rclone_path)
+    let mut child = new_hidden_command(&request.rclone_path)
         .args(prefix_args)
         .args(&args)
         .stdout(Stdio::piped())
@@ -1299,7 +1316,7 @@ fn run_rclone_copyto_download(
         request.show_large_file_progress,
     )?;
 
-    let mut child = Command::new(&request.rclone_path)
+    let mut child = new_hidden_command(&request.rclone_path)
         .args(prefix_args)
         .args(&args)
         .stdout(Stdio::piped())
@@ -1653,7 +1670,7 @@ fn git_update_command_args(index_root: &Path) -> Vec<OsString> {
 
 fn update_manifest_from_git_blocking(index_repo_path: String) -> Result<CommandResult, String> {
     let root = resolve_index_repo_path(&index_repo_path)?;
-    let output = Command::new("git")
+    let output = new_hidden_command("git")
         .args(git_update_command_args(&root))
         .output()
         .map_err(|error| format!("Failed to start git update command: {}", error))?;
@@ -1688,7 +1705,7 @@ fn check_rclone_remote_blocking(
     validate_rclone_executable(&rclone_path)?;
 
     let args = build_rclone_lsf_args(&remote, &bucket)?;
-    let output = Command::new(rclone_path.trim())
+    let output = new_hidden_command(rclone_path.trim())
         .args(args)
         .output()
         .map_err(|error| format!("Failed to start rclone check command: {}", error))?;
@@ -3211,6 +3228,31 @@ esac
 
         assert_eq!(csp, PRODUCTION_CSP);
         assert!(!csp.contains("unsafe-eval"));
+    }
+
+    #[test]
+    fn tauri_config_uses_kyanetwork_identity_and_chinese_installers() {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+        let contents = fs::read_to_string(config_path).expect("tauri config should be readable");
+        let config: serde_json::Value =
+            serde_json::from_str(&contents).expect("tauri config should parse");
+
+        assert_eq!(config["identifier"], "work.kyanet.ebookneo");
+        assert_eq!(config["bundle"]["publisher"], "Kyanetwork");
+        assert_eq!(
+            config["bundle"]["windows"]["nsis"]["languages"],
+            serde_json::json!(["SimpChinese", "English"])
+        );
+        assert_eq!(
+            config["bundle"]["windows"]["wix"]["language"],
+            serde_json::json!(["zh-CN", "en-US"])
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_child_processes_use_no_window_creation_flag() {
+        assert_eq!(windows_no_window_creation_flags(), 0x08000000);
     }
 
     #[test]
