@@ -129,7 +129,7 @@ chmod a+x Ebook*.AppImage
 
 ```bash
 rclone cat ebookneo-r2-readonly:tyut-ebooks-collection-neo/<object_key> > downloads/gui/<manifest-path>.ebook-neo-part
-rclone copyto ebookneo-r2-readonly:tyut-ebooks-collection-neo/<object_key> downloads/gui/<manifest-path>.ebook-neo-part --multi-thread-streams 8 --multi-thread-cutoff 1M --multi-thread-chunk-size 16M
+rclone copyto ebookneo-r2-readonly:tyut-ebooks-collection-neo/<object_key> downloads/gui/<manifest-path>.ebook-neo-part --multi-thread-streams 8 --multi-thread-cutoff 1M --multi-thread-chunk-size 16M --progress
 ```
 
 应用会先从 `manifests/files.jsonl` 找到选中文件对应的 `object_key`、`size` 和 `sha256`。小文件使用 `rclone cat` 流式写入临时文件；达到“大文件阈值”的文件使用 `rclone copyto` 写入同一个临时文件，并启用 rclone 的多线程下载参数。写完后会校验文件大小和 `sha256`，校验通过才替换到目标路径。
@@ -140,13 +140,13 @@ rclone copyto ebookneo-r2-readonly:tyut-ebooks-collection-neo/<object_key> downl
 
 `大文件阈值`控制何时从 `cat` 切换为 `copyto` 多线程路径，单位为 MiB，默认值是 20。`大文件线程`控制单个大文件的 rclone 多线程流数量，默认值是 8，范围为 1 到 16。它和文件级 `并发` 是两个不同设置：前者加速单个大文件，后者控制同时下载多少个文件。
 
-`大文件下载进度展示`默认开启。开启时，`copyto` 大文件路径会轮询目标 `.ebook-neo-part` 临时文件的当前大小，并用它和 manifest 中的文件大小比较来估算进度；关闭后，大文件只显示“下载中”，直到完成、失败或取消。这个估算不解析 rclone 日志，最终仍以文件大小和 `sha256` 校验结果为准。
+`大文件下载进度展示`默认开启。开启时，`copyto` 大文件路径会启用 rclone 的 `--progress` 输出，并解析 `Transferred:` 行来更新字节进度；关闭后，大文件只显示“下载中”，直到完成、失败或取消。最终仍以文件大小和 `sha256` 校验结果为准。
 
 资料页保留搜索、选择和整体进度摘要，只显示完成数量/总数，不展开完整逐文件消息。切到“下载”页后，可以看到本次任务的稳定队列：每个选中文件都会固定占一行，后续进度、完成、失败或取消事件只更新对应行，不会按事件先后跳动排序。
 
 单个文件失败不会阻止整批任务继续，失败项会保留在下载页中，可点击“重试失败”只重试这些路径。
 
-下载过程中，右侧面板会显示当前文件的字节级进度、整体完成数量和取消按钮。`cat` 路径会显示实时字节进度；`copyto` 大文件路径按“设置”页中的开关决定是否显示估算字节进度。取消会停止后续排队文件，并让后端尽量终止当前 rclone 进程；已经写入但未校验完成的 `.ebook-neo-part` 临时文件会被清理。
+下载过程中，右侧面板会显示当前文件的字节级进度、整体完成数量和取消按钮。`cat` 路径会显示实时字节进度；`copyto` 大文件路径按“设置”页中的开关决定是否解析 rclone 进度输出。取消会停止后续排队文件，并让后端尽量终止当前 rclone 进程；已经写入但未校验完成的 `.ebook-neo-part` 临时文件会被清理。
 
 “检查 R2”会运行只读的 rclone 列目录检查，用于确认当前 `rclone`、Remote 和 Bucket 设置是否可用。“打开目录”会创建并打开当前下载目录。
 

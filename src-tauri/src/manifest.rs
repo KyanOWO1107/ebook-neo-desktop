@@ -3,18 +3,16 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-const LARGE_FILE_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 static DOWNLOAD_TASK_COUNTER: AtomicU64 = AtomicU64::new(1);
 static DOWNLOAD_TASKS: OnceLock<DownloadTaskRegistry> = OnceLock::new();
 
@@ -612,6 +610,7 @@ fn build_rclone_copyto_args(
     record: &ManifestRecord,
     temp_path: &Path,
     streams: u16,
+    show_progress: bool,
 ) -> Result<Vec<OsString>, String> {
     let remote_name = remote.trim().trim_end_matches(':');
     let bucket_name = bucket.trim().trim_matches('/');
@@ -622,7 +621,7 @@ fn build_rclone_copyto_args(
         return Err("Large file streams must be between 1 and 16".to_string());
     }
 
-    Ok(vec![
+    let mut args = vec![
         OsString::from("copyto"),
         OsString::from(format!("{remote_name}:{bucket_name}/{}", record.object_key)),
         temp_path.as_os_str().to_os_string(),
@@ -634,7 +633,11 @@ fn build_rclone_copyto_args(
         OsString::from("16M"),
         OsString::from("--stats"),
         OsString::from("1s"),
-    ])
+    ];
+    if show_progress {
+        args.push(OsString::from("--progress"));
+    }
+    Ok(args)
 }
 
 fn select_records_by_paths(
@@ -808,6 +811,93 @@ where
         Ok(_) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(error) => format!("Failed to read process output: {error}"),
     }
+}
+
+fn parse_rclone_transferred_bytes(line: &str) -> Option<u64> {
+    line.split("Transferred:")
+        .skip(1)
+        .filter_map(|fragment| {
+            let before_total = fragment.trim_start().split('/').next()?.trim();
+            parse_rclone_size_bytes(before_total)
+        })
+        .last()
+}
+
+fn parse_rclone_size_bytes(value: &str) -> Option<u64> {
+    let mut parts = value.split_whitespace();
+    let amount = parts.next()?.replace(',', "");
+    let unit = parts.next()?;
+    let amount: f64 = amount.parse().ok()?;
+    let multiplier = match unit {
+        "B" => 1_f64,
+        "KiB" => 1024_f64,
+        "MiB" => 1024_f64 * 1024_f64,
+        "GiB" => 1024_f64 * 1024_f64 * 1024_f64,
+        "TiB" => 1024_f64 * 1024_f64 * 1024_f64 * 1024_f64,
+        "PiB" => 1024_f64 * 1024_f64 * 1024_f64 * 1024_f64 * 1024_f64,
+        _ => return None,
+    };
+    let bytes = amount * multiplier;
+    if bytes.is_finite() && bytes >= 0_f64 {
+        Some(bytes.round() as u64)
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_rclone_progress_output<R>(
+    reader: R,
+    enabled: bool,
+    progress_sink: &dyn ProgressSink,
+    task_id: &str,
+    record: &ManifestRecord,
+    completed_files: usize,
+    failed_files: usize,
+    total_files: usize,
+) -> String
+where
+    R: Read,
+{
+    let mut output = String::new();
+    let mut last_progress_bytes = 0_u64;
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                output.push_str(&line);
+                if enabled {
+                    if let Some(bytes_written) = parse_rclone_transferred_bytes(&line) {
+                        let bytes_written = bytes_written.min(record.size);
+                        if bytes_written > 0 && bytes_written != last_progress_bytes {
+                            last_progress_bytes = bytes_written;
+                            progress_sink.emit(download_progress_event(
+                                task_id,
+                                "progress",
+                                Some(&record.path),
+                                bytes_written,
+                                record.size,
+                                completed_files,
+                                failed_files,
+                                total_files,
+                                &format!("copying {}", record.path),
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                output.push_str(&format!("Failed to read rclone progress output: {error}"));
+                break;
+            }
+        }
+    }
+
+    output
 }
 
 fn stream_download_output<R, W>(
@@ -1206,68 +1296,76 @@ fn run_rclone_copyto_download(
         record,
         temp_path,
         request.large_file_streams,
+        request.show_large_file_progress,
     )?;
 
     let mut child = Command::new(&request.rclone_path)
         .args(prefix_args)
         .args(&args)
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("Failed to start rclone for {}: {}", record.path, error))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("Failed to capture rclone stdout for {}", record.path))?;
     let stderr = child
         .stderr
         .take()
         .ok_or_else(|| format!("Failed to capture rclone stderr for {}", record.path))?;
+    let mut stdout = Some(stdout);
+    let mut progress_output = String::new();
     let stderr_thread = thread::spawn(move || read_pipe_to_string(stderr));
-    let mut next_progress_at = Instant::now();
-    let mut last_progress_bytes = 0;
 
-    loop {
-        if child
-            .try_wait()
-            .map_err(|error| format!("Failed to poll rclone for {}: {}", record.path, error))?
-            .is_some()
-        {
-            break;
-        }
-        if request.show_large_file_progress && Instant::now() >= next_progress_at {
-            if let Ok(metadata) = fs::metadata(temp_path) {
-                let bytes_written = metadata.len().min(record.size);
-                if bytes_written > 0 && bytes_written != last_progress_bytes {
-                    last_progress_bytes = bytes_written;
-                    progress_sink.emit(download_progress_event(
-                        task_id,
-                        "progress",
-                        Some(&record.path),
-                        bytes_written,
-                        record.size,
-                        completed_files,
-                        failed_files,
-                        total_files,
-                        &format!("copying {}", record.path),
-                    ));
-                }
-            }
-            next_progress_at = Instant::now() + LARGE_FILE_PROGRESS_INTERVAL;
-        }
-        if cancel_flag.load(Ordering::SeqCst) {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = fs::remove_file(temp_path);
-            emit_canceled_download_event(
+    thread::scope(|scope| {
+        let stdout = stdout
+            .take()
+            .expect("copyto stdout should be captured before progress reader starts");
+        let progress_thread = scope.spawn(|| {
+            stream_rclone_progress_output(
+                stdout,
+                request.show_large_file_progress,
                 progress_sink,
                 task_id,
                 record,
                 completed_files,
                 failed_files,
                 total_files,
-            );
-            let _ = stderr_thread.join();
-            return Err("Download canceled".to_string());
+            )
+        });
+
+        loop {
+            if child
+                .try_wait()
+                .map_err(|error| format!("Failed to poll rclone for {}: {}", record.path, error))?
+                .is_some()
+            {
+                break;
+            }
+            if cancel_flag.load(Ordering::SeqCst) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(temp_path);
+                emit_canceled_download_event(
+                    progress_sink,
+                    task_id,
+                    record,
+                    completed_files,
+                    failed_files,
+                    total_files,
+                );
+                let _ = progress_thread.join();
+                return Err("Download canceled".to_string());
+            }
+            thread::sleep(std::time::Duration::from_millis(100));
         }
-        thread::sleep(std::time::Duration::from_millis(100));
-    }
+
+        progress_output = progress_thread
+            .join()
+            .unwrap_or_else(|_| "Failed to join rclone stdout reader".to_string());
+        Ok::<_, String>(())
+    })?;
 
     let status = child
         .wait()
@@ -1290,8 +1388,8 @@ fn run_rclone_copyto_download(
             &format!("failed {}", record.path),
         ));
         return Err(format!(
-            "rclone copyto failed for {} with status {}.\n{}",
-            record.path, status, stderr_text
+            "rclone copyto failed for {} with status {}.\n{}\n{}",
+            record.path, status, progress_output, stderr_text
         ));
     }
 
@@ -1760,6 +1858,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_rclone_transferred_progress_bytes() {
+        assert_eq!(
+            parse_rclone_transferred_bytes(
+                "Transferred:   \t    1.250 MiB / 128.407 MiB, 1%, 320 KiB/s, ETA 6m46s"
+            ),
+            Some(1_310_720),
+        );
+        assert_eq!(
+            parse_rclone_transferred_bytes(
+                " * 2.exe: 0% / 128.407 MiB, 0 B/s, -Transferred:   18.375 MiB / 128.407 MiB, 14%, 1.875 MiB/s, ETA 58s"
+            ),
+            Some(19_267_584),
+        );
+        assert_eq!(
+            parse_rclone_transferred_bytes("Transferred:            0 / 1, 0%"),
+            None,
+        );
+    }
+
+    #[test]
     fn download_task_commands_are_async_futures() {
         fn assert_start_download_signature<F, Fut>(_function: F)
         where
@@ -1926,19 +2044,17 @@ PY
 $destination = $args[2]
 $chunk = [byte[]]::new(8192)
 for ($i = 0; $i -lt $chunk.Length; $i++) {{ $chunk[$i] = 97 }}
-$stream = [IO.File]::Open($destination, [IO.FileMode]::Create, [IO.FileAccess]::Write)
-try {{
-  for ($i = 0; $i -lt 128; $i++) {{ $stream.Write($chunk, 0, $chunk.Length) }}
-}} finally {{
-  $stream.Dispose()
-}}
-Start-Sleep -Milliseconds 900
-$stream = [IO.File]::Open($destination, [IO.FileMode]::Append, [IO.FileAccess]::Write)
-try {{
-  for ($i = 0; $i -lt 256; $i++) {{ $stream.Write($chunk, 0, $chunk.Length) }}
-}} finally {{
-  $stream.Dispose()
-}}
+  [Console]::Out.WriteLine('Transferred:    1 MiB / 3 MiB, 33%, 1 MiB/s, ETA 2s')
+  [Console]::Out.Flush()
+  Start-Sleep -Milliseconds 900
+  [Console]::Out.WriteLine('Transferred:    2 MiB / 3 MiB, 66%, 1 MiB/s, ETA 1s')
+  [Console]::Out.Flush()
+  $stream = [IO.File]::Open($destination, [IO.FileMode]::Create, [IO.FileAccess]::Write)
+  try {{
+    for ($i = 0; $i -lt 384; $i++) {{ $stream.Write($chunk, 0, $chunk.Length) }}
+  }} finally {{
+    $stream.Dispose()
+  }}
 "#,
                 marker
                     .to_str()
@@ -1972,16 +2088,13 @@ try {{
             format!(
                 r#"#!/bin/sh
 printf '%s\n' "$@" > '{}'
+printf '%s\n' 'Transferred:    1 MiB / 3 MiB, 33%, 1 MiB/s, ETA 2s'
+sleep 0.9
+printf '%s\n' 'Transferred:    2 MiB / 3 MiB, 66%, 1 MiB/s, ETA 1s'
 python3 - "$3" <<'PY'
 import sys
-import time
 with open(sys.argv[1], 'wb') as f:
-    f.write(b'a' * (1024 * 1024))
-    f.flush()
-time.sleep(0.9)
-with open(sys.argv[1], 'ab') as f:
-    f.write(b'a' * (2 * 1024 * 1024))
-    f.flush()
+    f.write(b'a' * (3 * 1024 * 1024))
 PY
 "#,
                 marker.to_string_lossy()
@@ -2113,6 +2226,7 @@ esac
             &record,
             &temp_path,
             8,
+            true,
         )
         .expect("rclone copyto args should build");
 
@@ -2133,6 +2247,7 @@ esac
                 OsString::from("16M"),
                 OsString::from("--stats"),
                 OsString::from("1s"),
+                OsString::from("--progress"),
             ]
         );
     }
