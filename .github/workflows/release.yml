@@ -70,6 +70,13 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Resolve release version
+        id: release_version
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_VERSION -replace '^ebook-neo-desktop-v', ''
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Run frontend tests
         run: npm test
 
@@ -87,7 +94,7 @@ jobs:
         with:
           args: ${{ matrix.args }}
           tagName: ${{ github.event_name == 'workflow_dispatch' && format('ebook-neo-desktop-v{0}', inputs.version) || github.ref_name }}
-          releaseName: "Ebook Neo Desktop ${{ env.RELEASE_VERSION }}"
+          releaseName: "Ebook Neo Desktop ${{ steps.release_version.outputs.version }}"
           releaseBody: |
             Windows and Linux desktop builds for Ebook Neo.
 
