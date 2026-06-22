@@ -15,7 +15,19 @@
 
 当前版本不包含上传、账号管理或公开下载功能。上传和 manifest 生成仍由维护者在本地命令行完成，并通过 Git/GitHub 推送。
 
-协作者从零开始配置和下载资料，可先看索引仓库中的短指南：
+协作者使用安装包配置和下载资料，可先看：
+
+```text
+docs/collaborator-install.md
+```
+
+维护者发布 Windows/Linux 协作者稳定版，可按：
+
+```text
+docs/release-checklist.md
+```
+
+如果需要从源码开发运行，再参考索引仓库中的短指南：
 
 ```text
 TYUT-ebooks-collection-neo/docs/collaborator-quickstart.md
@@ -23,12 +35,16 @@ TYUT-ebooks-collection-neo/docs/collaborator-quickstart.md
 
 ## 前置条件
 
-所有平台都需要：
+使用安装包的普通协作者需要：
+
+- Git。
+- rclone，并且已经配置只读 R2 remote。
+- 本地克隆 `TYUT-ebooks-collection-neo` 索引仓库。
+
+从源码运行或参与开发还需要：
 
 - Node.js `20.19+` 或 `22.12+`，以及 npm。
 - Rust 和 Cargo。
-- rclone，并且已经配置只读 R2 remote。
-- 本地克隆 `TYUT-ebooks-collection-neo` 索引仓库。
 
 默认下载设置：
 
@@ -96,6 +112,12 @@ $env:CARGO_BUILD_JOBS='1'; cargo check
 ## 发布流程
 
 Windows 和 Linux 安装包由 `.github/workflows/release.yml` 生成。这个 workflow 可以在 GitHub Actions 页面手动运行，也可以通过推送版本 tag 触发。
+
+协作者稳定版发布前，维护者应先完成：
+
+```text
+docs/release-checklist.md
+```
 
 手动运行时填写版本号，例如：
 
