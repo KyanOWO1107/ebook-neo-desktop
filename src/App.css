@@ -268,7 +268,7 @@ button.folder-disclosure:hover {
 
 .view-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(54px, 1fr));
+  grid-template-columns: repeat(4, minmax(46px, 1fr));
   align-items: center;
   height: 40px;
   padding: 4px;
@@ -675,6 +675,85 @@ button.folder-disclosure:hover {
 
 .downloads-view {
   gap: 12px;
+}
+
+.sync-view {
+  gap: 12px;
+}
+
+.sync-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 14px 14px 0;
+}
+
+.sync-summary span {
+  min-height: 42px;
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+  font-weight: 760;
+}
+
+.sync-lists {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.74fr);
+  gap: 12px;
+  overflow: hidden;
+  padding: 0 14px 14px;
+}
+
+.sync-lists section {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+}
+
+.sync-lists h3 {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 0.9rem;
+}
+
+.sync-row {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 88px minmax(0, 0.8fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.sync-row span {
+  color: var(--primary-strong);
+  font-size: 0.8rem;
+  font-weight: 780;
+}
+
+.sync-row.extra span {
+  color: #a05c00;
+}
+
+.sync-row strong,
+.sync-row small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-row small {
+  color: var(--muted);
 }
 
 .download-task-list {

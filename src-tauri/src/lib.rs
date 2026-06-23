@@ -12,6 +12,7 @@ pub fn run() {
             manifest::load_settings,
             manifest::open_download_root,
             manifest::save_settings,
+            manifest::scan_sync_plan,
             manifest::start_download,
             manifest::update_manifest_from_git
         ])

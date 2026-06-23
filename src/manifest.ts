@@ -27,6 +27,7 @@ export type ThemeMode = "light" | "dark";
 export type AppSettings = {
   indexRepoPath: string;
   downloadRoot: string;
+  syncRoot: string;
   rclonePath: string;
   remote: string;
   bucket: string;
@@ -53,6 +54,7 @@ export type DownloadRequestPayload = {
 export const defaultAppSettings: AppSettings = {
   indexRepoPath: "../TYUT-ebooks-collection-neo",
   downloadRoot: "downloads/gui",
+  syncRoot: "downloads/sync",
   rclonePath: "rclone",
   remote: "ebookneo-r2-readonly",
   bucket: "tyut-ebooks-collection-neo",

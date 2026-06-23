@@ -172,6 +172,8 @@ pub struct AppSettings {
     #[serde(default = "default_index_repo_path")]
     pub index_repo_path: String,
     pub download_root: String,
+    #[serde(default = "default_sync_root")]
+    pub sync_root: String,
     pub rclone_path: String,
     pub remote: String,
     pub bucket: String,
@@ -189,6 +191,7 @@ impl Default for AppSettings {
         Self {
             index_repo_path: default_index_repo_path(),
             download_root: "downloads/gui".to_string(),
+            sync_root: default_sync_root(),
             rclone_path: "rclone".to_string(),
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
@@ -205,6 +208,10 @@ fn default_index_repo_path() -> String {
     "../TYUT-ebooks-collection-neo".to_string()
 }
 
+fn default_sync_root() -> String {
+    "downloads/sync".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -214,6 +221,47 @@ fn default_true() -> bool {
 pub struct CommandResult {
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPlanRequest {
+    pub index_repo_path: String,
+    pub sync_root: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPlanItem {
+    pub path: String,
+    pub status: String,
+    pub size: u64,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtraLocalFile {
+    pub path: String,
+    pub size: u64,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPlan {
+    pub total_files: usize,
+    pub total_bytes: u64,
+    pub valid_files: usize,
+    pub valid_bytes: u64,
+    pub missing_files: usize,
+    pub missing_bytes: u64,
+    pub outdated_files: usize,
+    pub outdated_bytes: u64,
+    pub extra_files: usize,
+    pub extra_bytes: u64,
+    pub download_paths: Vec<String>,
+    pub items: Vec<SyncPlanItem>,
+    pub extras: Vec<ExtraLocalFile>,
 }
 
 fn default_settings() -> AppSettings {
@@ -296,6 +344,9 @@ fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     }
     if settings.download_root.trim().is_empty() {
         return Err("Download directory is required".to_string());
+    }
+    if settings.sync_root.trim().is_empty() {
+        return Err("Sync directory is required".to_string());
     }
     validate_rclone_executable(&settings.rclone_path)?;
     validate_remote_name(&settings.remote)?;
@@ -677,8 +728,8 @@ fn select_records_by_paths(
     Ok(selected)
 }
 
-fn resolve_download_root(index_root: &Path, download_root: &str) -> PathBuf {
-    let configured = PathBuf::from(download_root.trim());
+fn resolve_target_root(index_root: &Path, target_root: &str) -> PathBuf {
+    let configured = PathBuf::from(target_root.trim());
     if configured.is_absolute() {
         configured
     } else {
@@ -686,12 +737,16 @@ fn resolve_download_root(index_root: &Path, download_root: &str) -> PathBuf {
     }
 }
 
+fn resolve_sync_root(index_root: &Path, sync_root: &str) -> PathBuf {
+    resolve_target_root(index_root, sync_root)
+}
+
 fn prepare_download_directory(index_root: &Path, download_root: &str) -> Result<PathBuf, String> {
     if download_root.trim().is_empty() {
         return Err("Download directory is required".to_string());
     }
 
-    let directory = resolve_download_root(index_root, download_root);
+    let directory = resolve_target_root(index_root, download_root);
     fs::create_dir_all(&directory)
         .map_err(|error| format!("Failed to create {}: {}", directory.display(), error))?;
     fs::canonicalize(&directory)
@@ -703,7 +758,7 @@ fn build_destination_path(
     download_root: &str,
     manifest_path: &str,
 ) -> Result<PathBuf, String> {
-    let base = resolve_download_root(index_root, download_root);
+    let base = resolve_target_root(index_root, download_root);
     let mut destination = base;
 
     for segment in validate_manifest_path(manifest_path)? {
@@ -719,7 +774,7 @@ fn ensure_destination_parent_inside_download_root(
     destination: &Path,
     manifest_path: &str,
 ) -> Result<(), String> {
-    let base = resolve_download_root(index_root, download_root);
+    let base = resolve_target_root(index_root, download_root);
     let base = fs::canonicalize(&base)
         .map_err(|error| format!("Failed to resolve {}: {}", base.display(), error))?;
     let parent = destination
@@ -755,6 +810,20 @@ fn verify_downloaded_file(
         ));
     }
 
+    let actual = file_sha256(path)?;
+    if actual != expected_sha256.to_ascii_lowercase() {
+        return Err(format!(
+            "SHA256 mismatch for {}: expected {}, got {}",
+            path.display(),
+            expected_sha256,
+            actual
+        ));
+    }
+
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path)
         .map_err(|error| format!("Failed to open {}: {}", path.display(), error))?;
     let mut hasher = Sha256::new();
@@ -770,17 +839,7 @@ fn verify_downloaded_file(
         hasher.update(&buffer[..read]);
     }
 
-    let actual = hex_sha256(&hasher.finalize());
-    if actual != expected_sha256.to_ascii_lowercase() {
-        return Err(format!(
-            "SHA256 mismatch for {}: expected {}, got {}",
-            path.display(),
-            expected_sha256,
-            actual
-        ));
-    }
-
-    Ok(())
+    Ok(hex_sha256(&hasher.finalize()))
 }
 
 fn temp_download_path(destination: &Path) -> PathBuf {
@@ -816,6 +875,208 @@ fn install_verified_download(temp_path: &Path, destination: &Path) -> Result<(),
             destination.display(),
             error
         )
+    })
+}
+
+fn path_to_manifest_string(path: &Path) -> Option<String> {
+    let parts = path
+        .components()
+        .map(|component| component.as_os_str().to_str().map(ToString::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn collect_extra_local_files(
+    directory: &Path,
+    base: &Path,
+    manifest_paths: &std::collections::HashSet<String>,
+    extras: &mut Vec<ExtraLocalFile>,
+) -> Result<(), String> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(directory)
+        .map_err(|error| format!("Failed to read {}: {}", directory.display(), error))?
+    {
+        let entry = entry.map_err(|error| format!("Failed to read directory entry: {}", error))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("Failed to stat {}: {}", path.display(), error))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_extra_local_files(&path, base, manifest_paths, extras)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".ebook-neo-part"))
+        {
+            continue;
+        }
+        let relative = path.strip_prefix(base).map_err(|error| {
+            format!(
+                "Failed to build relative path for {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+        let Some(relative_path) = path_to_manifest_string(relative) else {
+            continue;
+        };
+        if !manifest_paths.contains(&relative_path) {
+            extras.push(ExtraLocalFile {
+                path: relative_path,
+                size: metadata.len(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn sync_item_for_record(
+    index_root: &Path,
+    sync_root_setting: &str,
+    record: &ManifestRecord,
+) -> Result<SyncPlanItem, String> {
+    validate_manifest_record(record)?;
+    let destination = build_destination_path(index_root, sync_root_setting, &record.path)?;
+    let metadata = match fs::symlink_metadata(&destination) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SyncPlanItem {
+                path: record.path.clone(),
+                status: "missing".to_string(),
+                size: record.size,
+                message: "local file is missing".to_string(),
+            });
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to stat sync target {}: {}",
+                destination.display(),
+                error
+            ));
+        }
+    };
+
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Ok(SyncPlanItem {
+            path: record.path.clone(),
+            status: "typeMismatch".to_string(),
+            size: record.size,
+            message: "local path is not a regular file".to_string(),
+        });
+    }
+    if metadata.len() != record.size {
+        return Ok(SyncPlanItem {
+            path: record.path.clone(),
+            status: "sizeMismatch".to_string(),
+            size: record.size,
+            message: format!(
+                "local size is {} bytes, expected {} bytes",
+                metadata.len(),
+                record.size
+            ),
+        });
+    }
+    let actual_sha256 = file_sha256(&destination)?;
+    if actual_sha256 != record.sha256 {
+        return Ok(SyncPlanItem {
+            path: record.path.clone(),
+            status: "sha256Mismatch".to_string(),
+            size: record.size,
+            message: "local sha256 does not match manifest".to_string(),
+        });
+    }
+
+    Ok(SyncPlanItem {
+        path: record.path.clone(),
+        status: "valid".to_string(),
+        size: record.size,
+        message: "local file is valid".to_string(),
+    })
+}
+
+fn build_sync_plan_for_records(
+    index_root: &Path,
+    sync_root: &Path,
+    records: &[ManifestRecord],
+) -> Result<SyncPlan, String> {
+    if sync_root.as_os_str().is_empty() {
+        return Err("Sync directory is required".to_string());
+    }
+    fs::create_dir_all(sync_root)
+        .map_err(|error| format!("Failed to create {}: {}", sync_root.display(), error))?;
+    let sync_root = fs::canonicalize(sync_root)
+        .map_err(|error| format!("Failed to resolve {}: {}", sync_root.display(), error))?;
+    let sync_root_setting = sync_root.to_string_lossy();
+
+    let manifest_paths = records
+        .iter()
+        .map(|record| record.path.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut items = Vec::with_capacity(records.len());
+    let mut download_paths = Vec::new();
+    let mut valid_files = 0_usize;
+    let mut valid_bytes = 0_u64;
+    let mut missing_files = 0_usize;
+    let mut missing_bytes = 0_u64;
+    let mut outdated_files = 0_usize;
+    let mut outdated_bytes = 0_u64;
+    let total_bytes = records.iter().map(|record| record.size).sum();
+
+    for record in records {
+        let item = sync_item_for_record(index_root, &sync_root_setting, record)?;
+        match item.status.as_str() {
+            "valid" => {
+                valid_files += 1;
+                valid_bytes += record.size;
+            }
+            "missing" => {
+                missing_files += 1;
+                missing_bytes += record.size;
+                download_paths.push(record.path.clone());
+            }
+            _ => {
+                outdated_files += 1;
+                outdated_bytes += record.size;
+                download_paths.push(record.path.clone());
+            }
+        }
+        items.push(item);
+    }
+
+    let mut extras = Vec::new();
+    collect_extra_local_files(&sync_root, &sync_root, &manifest_paths, &mut extras)?;
+    extras.sort_by(|left, right| left.path.cmp(&right.path));
+    let extra_bytes = extras.iter().map(|extra| extra.size).sum();
+
+    Ok(SyncPlan {
+        total_files: records.len(),
+        total_bytes,
+        valid_files,
+        valid_bytes,
+        missing_files,
+        missing_bytes,
+        outdated_files,
+        outdated_bytes,
+        extra_files: extras.len(),
+        extra_bytes,
+        download_paths,
+        items,
+        extras,
     })
 }
 
@@ -1695,6 +1956,24 @@ pub async fn update_manifest_from_git(index_repo_path: String) -> Result<Command
     tauri::async_runtime::spawn_blocking(move || update_manifest_from_git_blocking(index_repo_path))
         .await
         .map_err(|error| format!("Git update worker failed: {}", error))?
+}
+
+fn scan_sync_plan_blocking(request: SyncPlanRequest) -> Result<SyncPlan, String> {
+    if request.sync_root.trim().is_empty() {
+        return Err("Sync directory is required".to_string());
+    }
+    let root = resolve_index_repo_path(&request.index_repo_path)?;
+    let manifest_path = root.join("manifests/files.jsonl");
+    let records = load_manifest_from_path(&manifest_path)?;
+    let sync_root = resolve_sync_root(&root, &request.sync_root);
+    build_sync_plan_for_records(&root, &sync_root, &records)
+}
+
+#[tauri::command]
+pub async fn scan_sync_plan(request: SyncPlanRequest) -> Result<SyncPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || scan_sync_plan_blocking(request))
+        .await
+        .map_err(|error| format!("Sync scan worker failed: {}", error))?
 }
 
 fn check_rclone_remote_blocking(
@@ -3315,6 +3594,8 @@ esac
 
         assert_eq!(settings.index_repo_path, "../TYUT-ebooks-collection-neo");
         assert_eq!(settings.download_root, "downloads/gui");
+        assert_eq!(settings.sync_root, "downloads/sync");
+        assert_ne!(settings.sync_root, settings.download_root);
         assert_eq!(settings.rclone_path, "rclone");
         assert_eq!(settings.remote, "ebookneo-r2-readonly");
         assert_eq!(settings.bucket, "tyut-ebooks-collection-neo");
@@ -3389,6 +3670,7 @@ esac
         let settings = AppSettings {
             index_repo_path: "E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo".to_string(),
             download_root: "E:/Downloads/TYUT".to_string(),
+            sync_root: "E:/Downloads/TYUT Sync".to_string(),
             rclone_path: "E:/Tools/rclone.exe".to_string(),
             remote: "ebookneo-r2-readonly".to_string(),
             bucket: "tyut-ebooks-collection-neo".to_string(),
@@ -3480,6 +3762,58 @@ esac
                 .expect("index repo path should resolve from project root");
 
         assert_eq!(resolved, expected);
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn sync_plan_classifies_valid_missing_outdated_and_extra_files() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-sync-plan-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        let index_root = temp_dir.join("index");
+        fs::create_dir_all(index_root.join("manifests")).expect("manifest dir should be created");
+        let sync_root = temp_dir.join("sync");
+        fs::create_dir_all(sync_root.join("资料")).expect("sync dir should be created");
+
+        let valid = test_manifest_record("资料/valid.txt", "valid.txt");
+        fs::write(sync_root.join("资料/valid.txt"), b"abc")
+            .expect("valid local file should be written");
+        let mismatch = test_manifest_record("资料/mismatch.txt", "mismatch.txt");
+        fs::write(sync_root.join("资料/mismatch.txt"), b"abd")
+            .expect("mismatch local file should be written");
+        let missing = test_manifest_record("资料/missing.txt", "missing.txt");
+        fs::write(sync_root.join("local-extra.txt"), b"local")
+            .expect("extra file should be written");
+
+        let plan =
+            build_sync_plan_for_records(&index_root, &sync_root, &[valid, mismatch, missing])
+                .expect("sync plan should build");
+
+        assert_eq!(plan.total_files, 3);
+        assert_eq!(plan.valid_files, 1);
+        assert_eq!(plan.missing_files, 1);
+        assert_eq!(plan.outdated_files, 1);
+        assert_eq!(plan.extra_files, 1);
+        assert_eq!(
+            plan.download_paths,
+            vec!["资料/mismatch.txt", "资料/missing.txt"]
+        );
+        assert_eq!(plan.extras[0].path, "local-extra.txt");
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|item| (item.path.as_str(), item.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("资料/valid.txt", "valid"),
+                ("资料/mismatch.txt", "sha256Mismatch"),
+                ("资料/missing.txt", "missing")
+            ]
+        );
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
     }
 }

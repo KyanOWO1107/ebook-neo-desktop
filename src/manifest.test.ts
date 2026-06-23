@@ -101,6 +101,7 @@ describe("manifest helpers", () => {
     expect(
       mergeAppSettings({
         downloadRoot: "D:/TYUT",
+        syncRoot: "D:/TYUT Sync",
         indexRepoPath: "E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo",
         downloadJobs: 8,
         theme: "dark",
@@ -108,10 +109,17 @@ describe("manifest helpers", () => {
     ).toEqual({
       ...defaultAppSettings,
       downloadRoot: "D:/TYUT",
+      syncRoot: "D:/TYUT Sync",
       indexRepoPath: "E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo",
       downloadJobs: 8,
       theme: "dark",
     });
+  });
+
+  it("keeps the default sync folder separate from the download folder", () => {
+    expect(defaultAppSettings.downloadRoot).toBe("downloads/gui");
+    expect(defaultAppSettings.syncRoot).toBe("downloads/sync");
+    expect(defaultAppSettings.syncRoot).not.toBe(defaultAppSettings.downloadRoot);
   });
 
   it("defaults to the sibling neo index repository path", () => {

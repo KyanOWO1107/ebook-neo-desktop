@@ -8,8 +8,9 @@
 - 按根目录浏览资料统计。
 - 搜索、勾选单个文件或当前列表。
 - 通过内置 Tauri 后端调用 `rclone cat` 或 `rclone copyto` 从 Cloudflare R2 只读 remote 下载。
-- 在“设置”页保存索引仓库、下载目录、rclone、R2 remote/bucket、下载并发数、大文件阈值/线程数、大文件进度展示和亮/暗主题设置。
+- 在“设置”页保存索引仓库、下载目录、同步目录、rclone、R2 remote/bucket、下载并发数、大文件阈值/线程数、大文件进度展示和亮/暗主题设置。
 - 通过 `git pull --ff-only` 从 GitHub 更新资源表，然后重新加载 manifest。
+- 扫描独立同步目录，按 manifest 计划缺失或校验不一致的文件下载。
 
 客户端本身作为独立仓库维护。它通过“索引仓库”设置指向本地的 `TYUT-ebooks-collection-neo` 克隆目录，只从该目录读取资源表并执行 Git 更新；下载不再依赖索引仓库中的 Python 工具。
 
@@ -51,6 +52,7 @@ TYUT-ebooks-collection-neo/docs/collaborator-quickstart.md
 ```text
 index repo: ../TYUT-ebooks-collection-neo
 download root: downloads/gui
+sync root: downloads/sync
 rclone: rclone
 remote: ebookneo-r2-readonly
 bucket: tyut-ebooks-collection-neo
@@ -182,6 +184,16 @@ rclone copyto ebookneo-r2-readonly:tyut-ebooks-collection-neo/<object_key> downl
 
 “检查 R2”会运行只读的 rclone 列目录检查，用于确认当前 `rclone`、Remote 和 Bucket 设置是否可用。“打开目录”会创建并打开当前下载目录。
 
+## 同步行为
+
+“同步”页使用“设置”页中的同步目录，和普通下载目录相互独立。点击“扫描同步”后，应用会读取当前资源表，对比同步目录中的本地文件：
+
+- 本地文件大小和 `sha256` 都匹配时标记为有效。
+- 本地缺失、大小不一致、`sha256` 不一致或目标路径不是普通文件时列入待同步。
+- 同步目录中不在资源表里的额外文件只展示，不会自动删除或移动。
+
+点击“开始同步”后，应用会复用同一套下载引擎，把待同步文件下载到同步目录，并在写入后再次用大小和 `sha256` 校验。同步功能仍是协作者只读功能，不会上传、删除 R2 对象，也不会修改索引仓库内容。
+
 ## 更新资源表
 
 点击“更新资源表”后，应用会在“索引仓库”目录运行：
@@ -195,4 +207,5 @@ git pull --ff-only
 ## 已知边界
 
 - 选择粒度支持文件、当前可见列表和当前目录。
+- 同步目前按整个资源表扫描同步目录；目录级/筛选级同步可以作为后续增强。
 - 更新 R2 对象和生成 manifest 仍使用命令行工具，暂不放入 GUI。

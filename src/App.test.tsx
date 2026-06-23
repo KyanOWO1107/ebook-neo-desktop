@@ -75,6 +75,41 @@ describe("App", () => {
       if (command === "open_download_root") {
         return Promise.resolve("E:/Workplace/LR/Ebook/TYUT-ebooks-collection-neo/downloads/gui");
       }
+      if (command === "scan_sync_plan") {
+        return Promise.resolve({
+          totalFiles: 2,
+          totalBytes: 3072,
+          validFiles: 1,
+          validBytes: 1024,
+          missingFiles: 1,
+          missingBytes: 2048,
+          outdatedFiles: 0,
+          outdatedBytes: 0,
+          extraFiles: 1,
+          extraBytes: 12,
+          downloadPaths: ["资料/数据结构/b.pdf"],
+          items: [
+            {
+              path: "资料/数据结构/a.pdf",
+              status: "valid",
+              size: 1024,
+              message: "local file is valid",
+            },
+            {
+              path: "资料/数据结构/b.pdf",
+              status: "missing",
+              size: 2048,
+              message: "local file is missing",
+            },
+          ],
+          extras: [
+            {
+              path: "notes/local.txt",
+              size: 12,
+            },
+          ],
+        });
+      }
       if (command === "start_download") {
         return Promise.resolve({ taskId: "download-1" });
       }
@@ -103,6 +138,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
 
     const downloadRoot = screen.getByLabelText("下载目录") as HTMLInputElement;
+    const syncRoot = screen.getByLabelText("同步目录") as HTMLInputElement;
     const indexRepoPath = screen.getByLabelText("索引仓库") as HTMLInputElement;
     const largeFileThreshold = screen.getByLabelText("大文件阈值") as HTMLInputElement;
     const largeFileStreams = screen.getByLabelText("大文件线程") as HTMLInputElement;
@@ -112,6 +148,12 @@ describe("App", () => {
 
     fireEvent.change(downloadRoot, { target: { value: "D:/TYUT downloads" } });
     expect(downloadRoot.value).toBe("D:/TYUT downloads");
+
+    fireEvent.change(syncRoot, { target: { value: "" } });
+    expect(syncRoot.value).toBe("");
+
+    fireEvent.change(syncRoot, { target: { value: "D:/TYUT sync" } });
+    expect(syncRoot.value).toBe("D:/TYUT sync");
 
     fireEvent.change(indexRepoPath, { target: { value: "" } });
     expect(indexRepoPath.value).toBe("");
@@ -140,6 +182,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "设置" }).getAttribute("data-active")).toBe("true");
     expect(screen.getByLabelText("索引仓库")).toBeTruthy();
     expect(screen.getByLabelText("下载目录")).toBeTruthy();
+    expect(screen.getByLabelText("同步目录")).toBeTruthy();
     expect(screen.getByLabelText("rclone")).toBeTruthy();
     expect(screen.getByLabelText("Remote")).toBeTruthy();
     expect(screen.getByLabelText("Bucket")).toBeTruthy();
@@ -149,6 +192,108 @@ describe("App", () => {
     expect(screen.getByLabelText("大文件下载进度展示")).toBeTruthy();
     expect(screen.getByLabelText("暗色模式")).toBeTruthy();
     expect(screen.getByRole("button", { name: "保存设置" })).toBeTruthy();
+  });
+
+  it("scans the saved sync folder and starts syncing only missing or outdated files", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "同步" }));
+    fireEvent.click(screen.getByRole("button", { name: "扫描同步" }));
+
+    await waitFor(() =>
+      expect(mockedInvoke()).toHaveBeenCalledWith("scan_sync_plan", {
+        request: {
+          indexRepoPath: defaultAppSettings.indexRepoPath,
+          syncRoot: defaultAppSettings.syncRoot,
+        },
+      }),
+    );
+    expect(await screen.findByText("缺失 1")).toBeTruthy();
+    expect(screen.getByText("额外 1")).toBeTruthy();
+    expect(screen.getByText("资料/数据结构/b.pdf")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "开始同步" }));
+
+    await waitFor(() =>
+      expect(mockedInvoke()).toHaveBeenLastCalledWith("start_download", {
+        request: {
+          indexRepoPath: defaultAppSettings.indexRepoPath,
+          paths: ["资料/数据结构/b.pdf"],
+          downloadRoot: defaultAppSettings.syncRoot,
+          rclonePath: defaultAppSettings.rclonePath,
+          remote: defaultAppSettings.remote,
+          bucket: defaultAppSettings.bucket,
+          downloadJobs: defaultAppSettings.downloadJobs,
+          largeFileThresholdMiB: defaultAppSettings.largeFileThresholdMiB,
+          largeFileStreams: defaultAppSettings.largeFileStreams,
+          showLargeFileProgress: defaultAppSettings.showLargeFileProgress,
+        },
+      }),
+    );
+  });
+
+  it("retries failed sync downloads back into the sync folder", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "同步" }));
+    fireEvent.click(screen.getByRole("button", { name: "扫描同步" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始同步" }));
+    await waitFor(() =>
+      expect(mockedInvoke().mock.calls.filter(([command]) => command === "start_download")).toHaveLength(1),
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "取消下载" })).toBeTruthy());
+    emitDownloadProgress({
+      taskId: "download-1",
+      kind: "failed",
+      path: "资料/数据结构/b.pdf",
+      bytesWritten: 0,
+      totalBytes: 2048,
+      completedFiles: 0,
+      failedFiles: 1,
+      totalFiles: 1,
+      message: "missing object",
+    });
+    emitDownloadProgress({
+      taskId: "download-1",
+      kind: "completed",
+      path: null,
+      bytesWritten: 0,
+      totalBytes: 0,
+      completedFiles: 0,
+      failedFiles: 1,
+      totalFiles: 1,
+      message: "download task completed: 0 complete, 1 failed",
+    });
+
+    await screen.findByText("missing object");
+    const retryButton = screen.getByRole("button", { name: "重试失败" }) as HTMLButtonElement;
+    await waitFor(() => expect(retryButton.disabled).toBe(false));
+    fireEvent.click(retryButton);
+
+    await waitFor(() =>
+      expect(mockedInvoke().mock.calls.filter(([command]) => command === "start_download")).toHaveLength(2),
+    );
+    const startDownloadCalls = mockedInvoke().mock.calls.filter(([command]) => command === "start_download");
+    expect(startDownloadCalls[1]).toEqual([
+      "start_download",
+      {
+        request: {
+          indexRepoPath: defaultAppSettings.indexRepoPath,
+          paths: ["资料/数据结构/b.pdf"],
+          downloadRoot: defaultAppSettings.syncRoot,
+          rclonePath: defaultAppSettings.rclonePath,
+          remote: defaultAppSettings.remote,
+          bucket: defaultAppSettings.bucket,
+          downloadJobs: defaultAppSettings.downloadJobs,
+          largeFileThresholdMiB: defaultAppSettings.largeFileThresholdMiB,
+          largeFileStreams: defaultAppSettings.largeFileStreams,
+          showLargeFileProgress: defaultAppSettings.showLargeFileProgress,
+        },
+      },
+    ]);
   });
 
   it("sends the saved large-file progress toggle with download requests", async () => {

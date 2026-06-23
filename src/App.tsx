@@ -68,6 +68,34 @@ type CommandResult = {
   stderr: string;
 };
 
+type SyncPlanItem = {
+  path: string;
+  status: "valid" | "missing" | "sizeMismatch" | "sha256Mismatch" | "typeMismatch";
+  size: number;
+  message: string;
+};
+
+type ExtraLocalFile = {
+  path: string;
+  size: number;
+};
+
+type SyncPlan = {
+  totalFiles: number;
+  totalBytes: number;
+  validFiles: number;
+  validBytes: number;
+  missingFiles: number;
+  missingBytes: number;
+  outdatedFiles: number;
+  outdatedBytes: number;
+  extraFiles: number;
+  extraBytes: number;
+  downloadPaths: string[];
+  items: SyncPlanItem[];
+  extras: ExtraLocalFile[];
+};
+
 function App() {
   const [records, setRecords] = useState<ManifestRecord[]>([]);
   const [query, setQuery] = useState("");
@@ -81,13 +109,16 @@ function App() {
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isCheckingRemote, setIsCheckingRemote] = useState(false);
   const [isOpeningDownloadRoot, setIsOpeningDownloadRoot] = useState(false);
+  const [isScanningSync, setIsScanningSync] = useState(false);
   const [downloadLog, setDownloadLog] = useState("等待选择...");
   const [downloadResults, setDownloadResults] = useState<DownloadItemResult[]>([]);
   const [downloadQueue, setDownloadQueue] = useState<DownloadQueueItem[]>([]);
+  const [syncPlan, setSyncPlan] = useState<SyncPlan | null>(null);
+  const [lastDownloadTargetRoot, setLastDownloadTargetRoot] = useState(defaultAppSettings.downloadRoot);
   const [activeDownloadTaskId, setActiveDownloadTaskId] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgressEvent | null>(null);
   const [downloadSettings, setDownloadSettings] = useState<AppSettings>(defaultAppSettings);
-  const [activeView, setActiveView] = useState<"resources" | "downloads" | "settings">("resources");
+  const [activeView, setActiveView] = useState<"resources" | "downloads" | "sync" | "settings">("resources");
   const activeDownloadTaskIdRef = useRef<string | null>(null);
   const isAwaitingDownloadTaskRef = useRef(false);
 
@@ -201,6 +232,36 @@ function App() {
       setStatus("打开下载目录失败");
     } finally {
       setIsOpeningDownloadRoot(false);
+    }
+  }
+
+  async function scanSyncPlan() {
+    if (isScanningSync) {
+      return;
+    }
+    setIsScanningSync(true);
+    setStatus("正在扫描同步目录...");
+    try {
+      const plan = await invoke<SyncPlan>("scan_sync_plan", {
+        request: {
+          indexRepoPath: downloadSettings.indexRepoPath,
+          syncRoot: downloadSettings.syncRoot,
+        },
+      });
+      setSyncPlan(plan);
+      setStatus(
+        `同步扫描完成：缺失 ${plan.missingFiles.toLocaleString()}，过期 ${plan.outdatedFiles.toLocaleString()}，额外 ${plan.extraFiles.toLocaleString()}`,
+      );
+      setDownloadLog(
+        plan.downloadPaths.length > 0
+          ? `待同步 ${plan.downloadPaths.length.toLocaleString()} 个文件到 ${downloadSettings.syncRoot}`
+          : "同步目录已经与资源表一致",
+      );
+    } catch (error) {
+      setStatus("同步扫描失败");
+      setDownloadLog(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsScanningSync(false);
     }
   }
 
@@ -362,17 +423,31 @@ function App() {
     return "queued";
   }
 
-  async function downloadPaths(paths: string[]) {
+  function buildCommandPreview(paths: string[], targetRoot: string) {
+    const selected = records.filter((record) => paths.includes(record.path));
+    if (selected.length === 1) {
+      return `${downloadSettings.rclonePath} ${
+        selected[0].size >= downloadSettings.largeFileThresholdMiB * 1024 * 1024 ? "copyto" : "cat"
+      } ${downloadSettings.remote}:${downloadSettings.bucket}/${selected[0].objectKey} -> ${targetRoot}/${selected[0].path}`;
+    }
+    return `${downloadSettings.rclonePath} cat/copyto>=${downloadSettings.largeFileThresholdMiB}MiB ${downloadSettings.remote}:${downloadSettings.bucket}/<object_key> -> ${targetRoot}/<manifest_path> ${selected
+      .slice(0, 3)
+      .map((record) => `'${record.path}'`)
+      .join(" ")}${selected.length > 3 ? " ..." : ""} (jobs=${downloadSettings.downloadJobs}, large-streams=${downloadSettings.largeFileStreams})`;
+  }
+
+  async function downloadPaths(paths: string[], targetRoot = downloadSettings.downloadRoot) {
     if (paths.length === 0 || isDownloading) {
       return;
     }
 
     setIsDownloading(true);
+    setLastDownloadTargetRoot(targetRoot);
     isAwaitingDownloadTaskRef.current = true;
     activeDownloadTaskIdRef.current = null;
     setActiveDownloadTaskId(null);
     setStatus(`正在下载 ${paths.length.toLocaleString()} 个文件...`);
-    setDownloadLog(commandPreview);
+    setDownloadLog(buildCommandPreview(paths, targetRoot));
     setDownloadResults([]);
     setDownloadQueue(
       paths.map((path) => {
@@ -399,7 +474,7 @@ function App() {
     });
     try {
       const task = await invoke<DownloadTask>("start_download", {
-        request: buildDownloadRequestPayload(downloadSettings, paths),
+        request: buildDownloadRequestPayload({ ...downloadSettings, downloadRoot: targetRoot }, paths),
       });
       if (activeDownloadTaskIdRef.current && activeDownloadTaskIdRef.current !== task.taskId) {
         throw new Error(`下载任务事件不匹配：${activeDownloadTaskIdRef.current} != ${task.taskId}`);
@@ -438,11 +513,19 @@ function App() {
     await downloadPaths(selectedRecords.map((record) => record.path));
   }
 
+  async function syncPlannedFiles() {
+    if (!syncPlan || syncPlan.downloadPaths.length === 0) {
+      return;
+    }
+    setActiveView("downloads");
+    await downloadPaths(syncPlan.downloadPaths, downloadSettings.syncRoot);
+  }
+
   async function retryFailedDownloads() {
     const failedPaths = downloadResults
       .filter((item) => item.status === "failed" && item.path)
       .map((item) => item.path as string);
-    await downloadPaths(failedPaths);
+    await downloadPaths(failedPaths, lastDownloadTargetRoot);
   }
 
   const failedDownloadCount = downloadResults.filter((item) => item.status === "failed").length;
@@ -458,13 +541,78 @@ function App() {
   const overallProgressPercent =
     totalProgressFiles > 0 ? Math.min(100, Math.round((totalProgressCount / totalProgressFiles) * 100)) : 0;
 
-  const commandPreview =
-    selectedRecords.length === 1
-      ? `${downloadSettings.rclonePath} ${selectedRecords[0].size >= downloadSettings.largeFileThresholdMiB * 1024 * 1024 ? "copyto" : "cat"} ${downloadSettings.remote}:${downloadSettings.bucket}/${selectedRecords[0].objectKey} -> ${downloadSettings.downloadRoot}/${selectedRecords[0].path}`
-      : `${downloadSettings.rclonePath} cat/copyto>=${downloadSettings.largeFileThresholdMiB}MiB ${downloadSettings.remote}:${downloadSettings.bucket}/<object_key> -> ${downloadSettings.downloadRoot}/<manifest_path> ${selectedRecords
-          .slice(0, 3)
-          .map((record) => `'${record.path}'`)
-          .join(" ")}${selectedRecords.length > 3 ? " ..." : ""} (jobs=${downloadSettings.downloadJobs}, large-streams=${downloadSettings.largeFileStreams})`;
+  const syncPanel = (
+    <div className="table-panel sync-view">
+      <div className="panel-head">
+        <div>
+          <h2>同步</h2>
+          <p>{syncPlan ? `同步目录：${downloadSettings.syncRoot}` : "扫描同步目录后生成只读同步计划"}</p>
+        </div>
+        <div className="selection-actions">
+          <button type="button" onClick={scanSyncPlan} disabled={isScanningSync}>
+            {isScanningSync ? "扫描中" : "扫描同步"}
+          </button>
+          <button
+            type="button"
+            onClick={syncPlannedFiles}
+            disabled={!syncPlan || syncPlan.downloadPaths.length === 0 || isDownloading}
+          >
+            开始同步
+          </button>
+        </div>
+      </div>
+
+      <div className="sync-summary" aria-label="同步统计">
+        <span>有效 {syncPlan?.validFiles.toLocaleString() ?? 0}</span>
+        <span>缺失 {syncPlan?.missingFiles.toLocaleString() ?? 0}</span>
+        <span>过期 {syncPlan?.outdatedFiles.toLocaleString() ?? 0}</span>
+        <span>额外 {syncPlan?.extraFiles.toLocaleString() ?? 0}</span>
+      </div>
+
+      <div className="sync-lists">
+        <section aria-label="待同步文件">
+          <h3>待同步文件</h3>
+          {!syncPlan && <p className="empty-state">点击“扫描同步”后会列出缺失或校验不一致的文件。</p>}
+          {syncPlan && syncPlan.downloadPaths.length === 0 && (
+            <p className="empty-state">当前同步目录中没有需要下载的文件。</p>
+          )}
+          {syncPlan?.items
+            .filter((item) => item.status !== "valid")
+            .slice(0, 200)
+            .map((item) => (
+              <div className="sync-row" data-status={item.status} key={item.path}>
+                <span>
+                  {item.status === "missing"
+                    ? "缺失"
+                    : item.status === "sizeMismatch"
+                      ? "大小"
+                      : item.status === "sha256Mismatch"
+                        ? "校验"
+                        : "类型"}
+                </span>
+                <strong title={item.path}>{item.path}</strong>
+                <small>{formatBytes(item.size)}</small>
+                <small title={item.message}>{item.message}</small>
+              </div>
+            ))}
+        </section>
+
+        <section aria-label="额外本地文件">
+          <h3>额外本地文件</h3>
+          {!syncPlan && <p className="empty-state">额外文件只会展示，不会自动删除。</p>}
+          {syncPlan && syncPlan.extras.length === 0 && <p className="empty-state">未发现额外本地文件。</p>}
+          {syncPlan?.extras.slice(0, 200).map((extra) => (
+            <div className="sync-row extra" key={extra.path}>
+              <span>额外</span>
+              <strong title={extra.path}>{extra.path}</strong>
+              <small>{formatBytes(extra.size)}</small>
+              <small>not in manifest</small>
+            </div>
+          ))}
+        </section>
+      </div>
+    </div>
+  );
 
   const settingsPanel = (
     <div className="table-panel settings-view">
@@ -504,6 +652,16 @@ function App() {
             onChange={(event) => {
               const value = event.currentTarget.value;
               setDownloadSettings((settings) => ({ ...settings, downloadRoot: value }));
+            }}
+          />
+        </label>
+        <label className="settings-wide">
+          <span>同步目录</span>
+          <input
+            value={downloadSettings.syncRoot}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setDownloadSettings((settings) => ({ ...settings, syncRoot: value }));
             }}
           />
         </label>
@@ -699,6 +857,13 @@ function App() {
             </button>
             <button
               type="button"
+              data-active={activeView === "sync"}
+              onClick={() => setActiveView("sync")}
+            >
+              同步
+            </button>
+            <button
+              type="button"
               data-active={activeView === "settings"}
               onClick={() => setActiveView("settings")}
             >
@@ -839,6 +1004,8 @@ function App() {
                 ))}
               </div>
             </div>
+          ) : activeView === "sync" ? (
+            syncPanel
           ) : (
             settingsPanel
           )}
