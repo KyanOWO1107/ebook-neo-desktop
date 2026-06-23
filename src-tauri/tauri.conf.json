@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Ebook Neo",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "identifier": "work.kyanet.ebookneo",
   "build": {
     "beforeDevCommand": "npm run dev",
