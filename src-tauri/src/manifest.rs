@@ -3231,7 +3231,7 @@ esac
     }
 
     #[test]
-    fn tauri_config_uses_kyanetwork_identity_and_chinese_installers() {
+    fn tauri_config_uses_kyanetwork_identity_chinese_installers_and_legacy_nsis_upgrade_template() {
         let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
         let contents = fs::read_to_string(config_path).expect("tauri config should be readable");
         let config: serde_json::Value =
@@ -3240,6 +3240,10 @@ esac
         assert_eq!(config["identifier"], "work.kyanet.ebookneo");
         assert_eq!(config["bundle"]["publisher"], "Kyanetwork");
         assert_eq!(
+            config["bundle"]["windows"]["nsis"]["template"],
+            "windows/nsis/installer.nsi"
+        );
+        assert_eq!(
             config["bundle"]["windows"]["nsis"]["languages"],
             serde_json::json!(["SimpChinese", "English"])
         );
@@ -3247,6 +3251,16 @@ esac
             config["bundle"]["windows"]["wix"]["language"],
             serde_json::json!(["zh-CN", "en-US"])
         );
+
+        let template_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("windows/nsis/installer.nsi");
+        let template_contents =
+            fs::read_to_string(template_path).expect("custom NSIS template should be readable");
+        assert!(template_contents.contains("LEGACYMANUPRODUCTKEY_TYUTEBOOKS"));
+        assert!(template_contents
+            .contains("ReadRegStr $4 SHCTX \"${LEGACYMANUPRODUCTKEY_TYUTEBOOKS}\" \"\""));
+        assert!(template_contents.contains("${If} $4 != \"\""));
+        assert!(template_contents.contains("StrCpy $R1 \"$R1 _?=$4\""));
     }
 
     #[test]

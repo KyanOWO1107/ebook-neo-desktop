@@ -30,6 +30,7 @@
     "publisher": "Kyanetwork",
     "windows": {
       "nsis": {
+        "template": "windows/nsis/installer.nsi",
         "languages": ["SimpChinese", "English"]
       },
       "wix": {

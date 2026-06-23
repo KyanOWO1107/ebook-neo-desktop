@@ -52,6 +52,8 @@ $env:CARGO_BUILD_JOBS='1'; cargo check
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
 
+如果版本只存在于 draft release、尚未正式给协作者发布，可以删除 draft 和远程 tag 后重打同一个版本。若版本已经公开发布或已被协作者下载使用，修复安装器或升级问题时应发布新的 patch 版本，例如从 `1.0.1` 升到 `1.0.2`，不要复用已公开 tag。
+
 当前发布 tag 格式：
 
 ```text
@@ -131,6 +133,8 @@ Release body 至少应说明：
 7. 下载一个小文件。
 8. 下载一个大于“大文件阈值”的文件，确认进度更新。
 9. 点击“打开目录”，确认目标目录可打开。
+
+从 `1.0.0` 升级到 `1.0.1` 及之后版本时，还应额外测试 NSIS `.exe` 的覆盖安装路径。`1.0.0` 使用旧 Publisher `tyutebooks`，`1.0.1` 起使用 `Kyanetwork`；安装器模板需要保留旧厂商注册表键的兼容逻辑，才能在选择“安装前卸载”时正确启动旧卸载器。
 
 Linux 测试如果有机器可用，优先测试 `.AppImage`。没有 Linux 机器时，至少确认 GitHub Actions 的 Linux job 通过，并在 Release 说明中保留反馈入口。
 
