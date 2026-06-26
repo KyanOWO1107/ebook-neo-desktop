@@ -272,6 +272,99 @@ describe("App", () => {
     );
   });
 
+  it("scans and syncs only the active folder when current-folder scope is selected", async () => {
+    mockedInvoke().mockImplementation((command: string) => {
+      if (command === "load_settings") {
+        return Promise.resolve(defaultAppSettings);
+      }
+      if (command === "load_manifest") {
+        return Promise.resolve(records);
+      }
+      if (command === "scan_sync_plan") {
+        return Promise.resolve({
+          totalFiles: 1,
+          totalBytes: 2048,
+          validFiles: 0,
+          validBytes: 0,
+          missingFiles: 1,
+          missingBytes: 2048,
+          outdatedFiles: 0,
+          outdatedBytes: 0,
+          extraFiles: 0,
+          extraBytes: 0,
+          downloadPaths: ["资料/数据结构/b.pdf"],
+          items: [
+            {
+              path: "资料/数据结构/b.pdf",
+              status: "missing",
+              size: 2048,
+              message: "local file is missing",
+            },
+          ],
+          extras: [],
+        });
+      }
+      if (command === "start_download") {
+        return Promise.resolve({ taskId: "download-1" });
+      }
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "展开资料" }));
+    fireEvent.click(screen.getByRole("button", { name: /数据结构/ }));
+    fireEvent.click(screen.getByRole("button", { name: "同步" }));
+    fireEvent.change(screen.getByLabelText("同步范围"), { target: { value: "folder" } });
+    fireEvent.click(screen.getByRole("button", { name: "扫描同步" }));
+
+    await waitFor(() =>
+      expect(mockedInvoke()).toHaveBeenCalledWith("scan_sync_plan", {
+        request: {
+          indexRepoPath: defaultAppSettings.indexRepoPath,
+          syncRoot: defaultAppSettings.syncRoot,
+          scopePrefix: "资料/数据结构",
+        },
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "开始同步" }));
+
+    await waitFor(() =>
+      expect(mockedInvoke()).toHaveBeenLastCalledWith("start_download", {
+        request: {
+          indexRepoPath: defaultAppSettings.indexRepoPath,
+          paths: ["资料/数据结构/b.pdf"],
+          downloadRoot: defaultAppSettings.syncRoot,
+          rclonePath: defaultAppSettings.rclonePath,
+          remote: defaultAppSettings.remote,
+          bucket: defaultAppSettings.bucket,
+          downloadJobs: defaultAppSettings.downloadJobs,
+          largeFileThresholdMiB: defaultAppSettings.largeFileThresholdMiB,
+          largeFileStreams: defaultAppSettings.largeFileStreams,
+          showLargeFileProgress: defaultAppSettings.showLargeFileProgress,
+        },
+      }),
+    );
+  });
+
+  it("opens the configured sync folder from the sync view", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "同步" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开同步目录" }));
+
+    await waitFor(() =>
+      expect(mockedInvoke()).toHaveBeenCalledWith("open_download_root", {
+        indexRepoPath: defaultAppSettings.indexRepoPath,
+        downloadRoot: defaultAppSettings.syncRoot,
+      }),
+    );
+    expect(await screen.findByText("已打开同步目录")).toBeTruthy();
+  });
+
   it("retries failed sync downloads back into the sync folder", async () => {
     render(<App />);
 

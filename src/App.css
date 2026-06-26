@@ -424,7 +424,9 @@ button.folder-disclosure:hover {
 
 .selection-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  justify-content: flex-end;
 }
 
 .selection-actions button {
@@ -721,6 +723,21 @@ button.folder-disclosure:hover {
 
 .sync-view {
   gap: 12px;
+}
+
+.sync-scope-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 14px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+  font-size: 0.86rem;
 }
 
 .sync-summary {

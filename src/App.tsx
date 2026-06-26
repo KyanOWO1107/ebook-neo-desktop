@@ -97,6 +97,7 @@ type SyncPlan = {
 };
 
 type SyncPendingFilter = "all" | "missing" | "outdated";
+type SyncScopeMode = "all" | "folder";
 
 function App() {
   const [records, setRecords] = useState<ManifestRecord[]>([]);
@@ -117,6 +118,7 @@ function App() {
   const [downloadQueue, setDownloadQueue] = useState<DownloadQueueItem[]>([]);
   const [downloadQueueFilter, setDownloadQueueFilter] = useState<DownloadQueueFilter>("all");
   const [syncPendingFilter, setSyncPendingFilter] = useState<SyncPendingFilter>("all");
+  const [syncScopeMode, setSyncScopeMode] = useState<SyncScopeMode>("all");
   const [syncPlan, setSyncPlan] = useState<SyncPlan | null>(null);
   const [lastDownloadTargetRoot, setLastDownloadTargetRoot] = useState(defaultAppSettings.downloadRoot);
   const [activeDownloadTaskId, setActiveDownloadTaskId] = useState<string | null>(null);
@@ -220,39 +222,52 @@ function App() {
     }
   }
 
-  async function openDownloadRoot() {
+  async function openTargetRoot(targetRoot: string, label: "下载目录" | "同步目录") {
     if (isOpeningDownloadRoot) {
       return;
     }
     setIsOpeningDownloadRoot(true);
-    setStatus("正在打开下载目录...");
+    setStatus(`正在打开${label}...`);
     try {
       const preparedPath = await invoke<string>("open_download_root", {
         indexRepoPath: downloadSettings.indexRepoPath,
-        downloadRoot: downloadSettings.downloadRoot,
+        downloadRoot: targetRoot,
       });
-      setDownloadLog(`已打开下载目录：${preparedPath}`);
-      setStatus("已打开下载目录");
+      setDownloadLog(`已打开${label}：${preparedPath}`);
+      setStatus(`已打开${label}`);
     } catch (error) {
       setDownloadLog(error instanceof Error ? error.message : String(error));
-      setStatus("打开下载目录失败");
+      setStatus(`打开${label}失败`);
     } finally {
       setIsOpeningDownloadRoot(false);
     }
   }
 
+  async function openDownloadRoot() {
+    await openTargetRoot(downloadSettings.downloadRoot, "下载目录");
+  }
+
+  async function openSyncRoot() {
+    await openTargetRoot(downloadSettings.syncRoot, "同步目录");
+  }
+
   async function scanSyncPlan() {
-    if (isScanningSync) {
+    const scopePrefix = syncScopeMode === "folder" ? activeFolder : null;
+    if (isScanningSync || (syncScopeMode === "folder" && !scopePrefix)) {
       return;
     }
     setIsScanningSync(true);
     setStatus("正在扫描同步目录...");
     try {
+      const request: { indexRepoPath: string; syncRoot: string; scopePrefix?: string } = {
+        indexRepoPath: downloadSettings.indexRepoPath,
+        syncRoot: downloadSettings.syncRoot,
+      };
+      if (scopePrefix) {
+        request.scopePrefix = scopePrefix;
+      }
       const plan = await invoke<SyncPlan>("scan_sync_plan", {
-        request: {
-          indexRepoPath: downloadSettings.indexRepoPath,
-          syncRoot: downloadSettings.syncRoot,
-        },
+        request,
       });
       setSyncPlan(plan);
       setStatus(
@@ -571,6 +586,8 @@ function App() {
   const totalProgressFiles = downloadProgress?.totalFiles ?? 0;
   const overallProgressPercent =
     totalProgressFiles > 0 ? Math.min(100, Math.round((totalProgressCount / totalProgressFiles) * 100)) : 0;
+  const syncScopePrefix = syncScopeMode === "folder" ? activeFolder : null;
+  const syncScopeRequiresFolder = syncScopeMode === "folder" && !syncScopePrefix;
 
   const syncPanel = (
     <div className="table-panel sync-view">
@@ -580,17 +597,42 @@ function App() {
           <p>{syncPlan ? `同步目录：${downloadSettings.syncRoot}` : "扫描同步目录后生成只读同步计划"}</p>
         </div>
         <div className="selection-actions">
-          <button type="button" onClick={scanSyncPlan} disabled={isScanningSync}>
+          <select
+            aria-label="同步范围"
+            value={syncScopeMode}
+            onChange={(event) => {
+              setSyncScopeMode(event.currentTarget.value as SyncScopeMode);
+              setSyncPlan(null);
+            }}
+          >
+            <option value="all">全部资料</option>
+            <option value="folder">当前目录</option>
+          </select>
+          <button type="button" onClick={openSyncRoot} disabled={isOpeningDownloadRoot}>
+            打开同步目录
+          </button>
+          <button type="button" onClick={scanSyncPlan} disabled={isScanningSync || syncScopeRequiresFolder}>
             {isScanningSync ? "扫描中" : "扫描同步"}
           </button>
           <button
             type="button"
             onClick={syncPlannedFiles}
-            disabled={!syncPlan || syncPlan.downloadPaths.length === 0 || isDownloading}
+            disabled={syncScopeRequiresFolder || !syncPlan || syncPlan.downloadPaths.length === 0 || isDownloading}
           >
             开始同步
           </button>
         </div>
+      </div>
+
+      <div className="sync-scope-note">
+        <span>
+          {syncScopeMode === "folder"
+            ? syncScopePrefix
+              ? `当前目录：${syncScopePrefix}`
+              : "请先在左侧选择要同步的目录。"
+            : "范围：全部资料"}
+        </span>
+        <span>{status}</span>
       </div>
 
       <div className="sync-summary" aria-label="同步统计">
