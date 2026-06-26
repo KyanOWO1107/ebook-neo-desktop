@@ -97,8 +97,11 @@ button {
 
 .sidebar {
   display: flex;
+  min-height: 0;
+  max-height: 100vh;
   flex-direction: column;
   gap: 14px;
+  overflow: hidden;
   padding: 22px 18px;
   border-right: 1px solid var(--border);
   background: var(--sidebar);
@@ -107,6 +110,7 @@ button {
 
 .brand {
   display: grid;
+  flex: 0 0 auto;
   grid-template-columns: 44px 1fr;
   align-items: center;
   gap: 12px;
@@ -146,10 +150,12 @@ button {
 
 .folder-list {
   display: flex;
+  flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
   gap: 6px;
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .folder-row {
@@ -219,6 +225,7 @@ button.folder-disclosure:hover {
 }
 
 .folder-button.all {
+  flex: 0 0 auto;
   grid-template-columns: 20px minmax(0, 1fr) auto;
   min-height: 38px;
   padding: 8px 10px;

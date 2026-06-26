@@ -3,6 +3,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+// @ts-expect-error This test-only CSS contract check reads a local file without adding Node globals to the app types.
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import App from "./App";
 import { defaultAppSettings, type ManifestRecord } from "./manifest";
@@ -35,6 +37,14 @@ const records: ManifestRecord[] = [
     visibility: "private",
   },
 ];
+
+const appCss = readFileSync("src/App.css", "utf8");
+
+function cssBlock(selector: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = appCss.match(new RegExp(`${escapedSelector}\\s*\\{(?<body>[^}]+)\\}`));
+  return match?.groups?.body ?? "";
+}
 
 function makeRecord(index: number): ManifestRecord {
   const suffix = index.toString().padStart(4, "0");
@@ -255,6 +265,27 @@ describe("App", () => {
     fireEvent.click(screen.getByTitle("切换到暗色"));
 
     await waitFor(() => expect(document.documentElement.getAttribute("data-theme")).toBe("dark"));
+  });
+
+  it("keeps the sidebar header fixed while the folder index scrolls independently", async () => {
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+
+    const sidebar = screen.getByLabelText("资料分类");
+    const brand = sidebar.querySelector(".brand");
+    const folderList = sidebar.querySelector(".folder-list");
+
+    expect(brand).toBeTruthy();
+    expect(folderList).toBeTruthy();
+    expect(folderList?.contains(brand)).toBe(false);
+
+    expect(cssBlock(".sidebar")).toContain("min-height: 0;");
+    expect(cssBlock(".sidebar")).toContain("overflow: hidden;");
+    expect(cssBlock(".brand")).toContain("flex: 0 0 auto;");
+    expect(cssBlock(".folder-button.all")).toContain("flex: 0 0 auto;");
+    expect(cssBlock(".folder-list")).toContain("flex: 1 1 auto;");
+    expect(cssBlock(".folder-list")).toContain("overflow: auto;");
   });
 
   it("scans the saved sync folder and starts syncing only missing or outdated files", async () => {
