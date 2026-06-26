@@ -266,6 +266,24 @@ button.folder-disclosure:hover {
   color: var(--text);
 }
 
+.virtual-list {
+  min-height: 0;
+  overflow: auto;
+  contain: strict;
+}
+
+.virtual-list-spacer {
+  position: relative;
+  min-width: 0;
+}
+
+.virtual-list-row {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+}
+
 .view-tabs {
   display: grid;
   grid-template-columns: repeat(4, minmax(46px, 1fr));
