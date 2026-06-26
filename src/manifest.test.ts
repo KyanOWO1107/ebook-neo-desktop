@@ -9,10 +9,15 @@ import {
   filterRecords,
   formatBytes,
   buildDownloadRequestPayload,
+  buildRecordIndex,
+  filterDownloadQueue,
+  initializeDownloadQueue,
   recordsForFolderSelection,
   mergeAppSettings,
+  selectedRecordsFromIndex,
   themeAttribute,
   summarizeRecords,
+  updateDownloadQueueItem,
   type ManifestRecord,
 } from "./manifest";
 
@@ -170,5 +175,59 @@ describe("manifest helpers", () => {
       showLargeFileProgress: true,
     });
     expect(Object.keys(request)).not.toContain("largeFileThresholdMib");
+  });
+
+  it("builds a path index and resolves selected records without scanning the full manifest", () => {
+    const index = buildRecordIndex(records);
+
+    expect(index.get("资料/数据结构/a.pdf")?.size).toBe(1024);
+    expect(selectedRecordsFromIndex(index, new Set(["课件/大学物理/c.pptx", "missing"]))).toEqual([records[2]]);
+  });
+
+  it("initializes and updates download queue rows without reordering them", () => {
+    const index = buildRecordIndex(records);
+    const queue = initializeDownloadQueue(["资料/数据结构/a.pdf", "课件/大学物理/c.pptx"], index);
+
+    expect(queue).toEqual([
+      {
+        path: "资料/数据结构/a.pdf",
+        status: "queued",
+        message: "queued 资料/数据结构/a.pdf",
+        bytesWritten: 0,
+        totalBytes: 1024,
+      },
+      {
+        path: "课件/大学物理/c.pptx",
+        status: "queued",
+        message: "queued 课件/大学物理/c.pptx",
+        bytesWritten: 0,
+        totalBytes: 4096,
+      },
+    ]);
+
+    const updated = updateDownloadQueueItem(queue, "课件/大学物理/c.pptx", {
+      status: "downloaded",
+      bytesWritten: 4096,
+      message: "finished",
+    });
+
+    expect(updated.map((item) => item.path)).toEqual(["资料/数据结构/a.pdf", "课件/大学物理/c.pptx"]);
+    expect(updated[1]).toMatchObject({ status: "downloaded", bytesWritten: 4096, message: "finished" });
+  });
+
+  it("filters download queue rows by user-facing status groups", () => {
+    const queue = [
+      { path: "a", status: "queued", message: "", bytesWritten: 0, totalBytes: 10 },
+      { path: "b", status: "downloading", message: "", bytesWritten: 5, totalBytes: 10 },
+      { path: "c", status: "failed", message: "", bytesWritten: 0, totalBytes: 10 },
+      { path: "d", status: "downloaded", message: "", bytesWritten: 10, totalBytes: 10 },
+      { path: "e", status: "createdEmpty", message: "", bytesWritten: 0, totalBytes: 0 },
+      { path: "f", status: "canceled", message: "", bytesWritten: 0, totalBytes: 10 },
+    ] as const;
+
+    expect(filterDownloadQueue(queue, "all").map((item) => item.path)).toEqual(["a", "b", "c", "d", "e", "f"]);
+    expect(filterDownloadQueue(queue, "active").map((item) => item.path)).toEqual(["a", "b"]);
+    expect(filterDownloadQueue(queue, "failed").map((item) => item.path)).toEqual(["c", "f"]);
+    expect(filterDownloadQueue(queue, "completed").map((item) => item.path)).toEqual(["d", "e"]);
   });
 });

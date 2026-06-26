@@ -51,6 +51,24 @@ export type DownloadRequestPayload = {
   showLargeFileProgress: boolean;
 };
 
+export type DownloadQueueStatus =
+  | "queued"
+  | "downloading"
+  | "downloaded"
+  | "createdEmpty"
+  | "failed"
+  | "canceled";
+
+export type DownloadQueueFilter = "all" | "active" | "failed" | "completed";
+
+export type DownloadQueueItem = {
+  path: string;
+  status: DownloadQueueStatus;
+  message: string;
+  bytesWritten: number;
+  totalBytes: number;
+};
+
 export const defaultAppSettings: AppSettings = {
   indexRepoPath: "../TYUT-ebooks-collection-neo",
   downloadRoot: "downloads/gui",
@@ -78,6 +96,64 @@ export function buildDownloadRequestPayload(settings: AppSettings, paths: string
     largeFileStreams: settings.largeFileStreams,
     showLargeFileProgress: settings.showLargeFileProgress,
   };
+}
+
+export function buildRecordIndex(records: ManifestRecord[]): Map<string, ManifestRecord> {
+  return new Map(records.map((record) => [record.path, record]));
+}
+
+export function selectedRecordsFromIndex(
+  index: ReadonlyMap<string, ManifestRecord>,
+  selectedPaths: ReadonlySet<string>,
+): ManifestRecord[] {
+  const selected: ManifestRecord[] = [];
+  for (const path of selectedPaths) {
+    const record = index.get(path);
+    if (record) {
+      selected.push(record);
+    }
+  }
+  return selected;
+}
+
+export function initializeDownloadQueue(
+  paths: string[],
+  index: ReadonlyMap<string, ManifestRecord>,
+): DownloadQueueItem[] {
+  return paths.map((path) => {
+    const record = index.get(path);
+    return {
+      path,
+      status: "queued",
+      message: `queued ${path}`,
+      bytesWritten: 0,
+      totalBytes: record?.size ?? 0,
+    };
+  });
+}
+
+export function updateDownloadQueueItem(
+  queue: readonly DownloadQueueItem[],
+  path: string,
+  patch: Partial<Omit<DownloadQueueItem, "path">>,
+): DownloadQueueItem[] {
+  return queue.map((item) => (item.path === path ? { ...item, ...patch } : item));
+}
+
+export function filterDownloadQueue<T extends Pick<DownloadQueueItem, "status">>(
+  queue: readonly T[],
+  filter: DownloadQueueFilter,
+): T[] {
+  if (filter === "active") {
+    return queue.filter((item) => item.status === "queued" || item.status === "downloading");
+  }
+  if (filter === "failed") {
+    return queue.filter((item) => item.status === "failed" || item.status === "canceled");
+  }
+  if (filter === "completed") {
+    return queue.filter((item) => item.status === "downloaded" || item.status === "createdEmpty");
+  }
+  return [...queue];
 }
 
 export function themeAttribute(theme: string): ThemeMode {
