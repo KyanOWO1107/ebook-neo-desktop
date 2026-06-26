@@ -291,6 +291,14 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const theme = themeAttribute(downloadSettings.theme);
+    document.documentElement.dataset.theme = theme;
+    return () => {
+      delete document.documentElement.dataset.theme;
+    };
+  }, [downloadSettings.theme]);
+
+  useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
 

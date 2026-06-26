@@ -12,14 +12,26 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+:root[data-theme="dark"] {
+  color: #e8f1ff;
+  background: #0b1324;
+}
+
 * {
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
   min-width: 960px;
   min-height: 640px;
+  background: inherit;
+}
+
+#root {
+  min-height: 100vh;
+  background: inherit;
 }
 
 button,

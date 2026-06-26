@@ -233,6 +233,30 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "保存设置" })).toBeTruthy();
   });
 
+  it("syncs the theme to the document root so page background follows dark mode", async () => {
+    mockedInvoke().mockImplementation((command: string) => {
+      if (command === "load_settings") {
+        return Promise.resolve(defaultAppSettings);
+      }
+      if (command === "load_manifest") {
+        return Promise.resolve(records);
+      }
+      if (command === "save_settings") {
+        return Promise.resolve({ ...defaultAppSettings, theme: "dark" });
+      }
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+
+    fireEvent.click(screen.getByTitle("切换到暗色"));
+
+    await waitFor(() => expect(document.documentElement.getAttribute("data-theme")).toBe("dark"));
+  });
+
   it("scans the saved sync folder and starts syncing only missing or outdated files", async () => {
     render(<App />);
 
