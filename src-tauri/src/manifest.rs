@@ -228,6 +228,7 @@ pub struct CommandResult {
 pub struct SyncPlanRequest {
     pub index_repo_path: String,
     pub sync_root: String,
+    pub scope_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -574,6 +575,19 @@ fn validate_manifest_path(manifest_path: &str) -> Result<Vec<&str>, String> {
     }
 
     Ok(segments)
+}
+
+fn validate_sync_scope_prefix(scope_prefix: Option<&str>) -> Result<Option<String>, String> {
+    let Some(scope_prefix) = scope_prefix else {
+        return Ok(None);
+    };
+    let trimmed = scope_prefix.trim();
+    validate_manifest_path(trimmed)?;
+    Ok(Some(trimmed.to_string()))
+}
+
+fn manifest_path_matches_scope(path: &str, scope_prefix: &str) -> bool {
+    path == scope_prefix || path.starts_with(&format!("{scope_prefix}/"))
 }
 
 fn is_lowercase_sha256(value: &str) -> bool {
@@ -1965,6 +1979,15 @@ fn scan_sync_plan_blocking(request: SyncPlanRequest) -> Result<SyncPlan, String>
     let root = resolve_index_repo_path(&request.index_repo_path)?;
     let manifest_path = root.join("manifests/files.jsonl");
     let records = load_manifest_from_path(&manifest_path)?;
+    let scope_prefix = validate_sync_scope_prefix(request.scope_prefix.as_deref())?;
+    let records = if let Some(scope_prefix) = scope_prefix {
+        records
+            .into_iter()
+            .filter(|record| manifest_path_matches_scope(&record.path, &scope_prefix))
+            .collect::<Vec<_>>()
+    } else {
+        records
+    };
     let sync_root = resolve_sync_root(&root, &request.sync_root);
     build_sync_plan_for_records(&root, &sync_root, &records)
 }
@@ -3815,5 +3838,85 @@ esac
             ]
         );
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn scan_sync_plan_filters_records_by_scope_prefix() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ebook-neo-scoped-sync-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be valid")
+                .as_nanos()
+        ));
+        let index_root = temp_dir.join("index");
+        let manifest_dir = index_root.join("manifests");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir should be created");
+        let sync_root = temp_dir.join("sync");
+        fs::create_dir_all(sync_root.join("资料/数据结构")).expect("sync dir should be created");
+
+        let valid = test_manifest_record("资料/数据结构/valid.txt", "valid.txt");
+        fs::write(sync_root.join("资料/数据结构/valid.txt"), b"abc")
+            .expect("valid scoped file should be written");
+        let missing = test_manifest_record("资料/数据结构/missing.txt", "missing.txt");
+        let outside = test_manifest_record("资料/大学物理/outside.txt", "outside.txt");
+        fs::write(
+            manifest_dir.join("files.jsonl"),
+            [valid.clone(), missing.clone(), outside]
+                .into_iter()
+                .map(|record| {
+                    serde_json::json!({
+                        "path": record.path,
+                        "object_key": record.object_key,
+                        "sha256": record.sha256,
+                        "size": record.size,
+                        "storage": record.storage,
+                        "updated_at": record.updated_at,
+                        "visibility": record.visibility,
+                    })
+                    .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .expect("manifest should be written");
+
+        let plan = scan_sync_plan_blocking(SyncPlanRequest {
+            index_repo_path: index_root.to_string_lossy().into_owned(),
+            sync_root: sync_root.to_string_lossy().into_owned(),
+            scope_prefix: Some("资料/数据结构".to_string()),
+        })
+        .expect("scoped sync plan should build");
+
+        assert_eq!(plan.total_files, 2);
+        assert_eq!(plan.valid_files, 1);
+        assert_eq!(plan.missing_files, 1);
+        assert_eq!(plan.download_paths, vec!["资料/数据结构/missing.txt"]);
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["资料/数据结构/valid.txt", "资料/数据结构/missing.txt"]
+        );
+        fs::remove_dir_all(&temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn scan_sync_plan_rejects_invalid_scope_prefix() {
+        let request: SyncPlanRequest = serde_json::from_value(serde_json::json!({
+            "indexRepoPath": "../TYUT-ebooks-collection-neo",
+            "syncRoot": "downloads/sync",
+            "scopePrefix": "../escape"
+        }))
+        .expect("request should deserialize");
+
+        let error = validate_sync_scope_prefix(request.scope_prefix.as_deref())
+            .expect_err("invalid scope prefix should fail");
+
+        assert_eq!(
+            error,
+            "Manifest path must stay inside the download directory: ../escape"
+        );
     }
 }
