@@ -96,6 +96,8 @@ type SyncPlan = {
   extras: ExtraLocalFile[];
 };
 
+type SyncPendingFilter = "all" | "missing" | "outdated";
+
 function App() {
   const [records, setRecords] = useState<ManifestRecord[]>([]);
   const [query, setQuery] = useState("");
@@ -114,6 +116,7 @@ function App() {
   const [downloadResults, setDownloadResults] = useState<DownloadItemResult[]>([]);
   const [downloadQueue, setDownloadQueue] = useState<DownloadQueueItem[]>([]);
   const [downloadQueueFilter, setDownloadQueueFilter] = useState<DownloadQueueFilter>("all");
+  const [syncPendingFilter, setSyncPendingFilter] = useState<SyncPendingFilter>("all");
   const [syncPlan, setSyncPlan] = useState<SyncPlan | null>(null);
   const [lastDownloadTargetRoot, setLastDownloadTargetRoot] = useState(defaultAppSettings.downloadRoot);
   const [activeDownloadTaskId, setActiveDownloadTaskId] = useState<string | null>(null);
@@ -312,6 +315,16 @@ function App() {
     () => filterDownloadQueue(downloadQueue, downloadQueueFilter),
     [downloadQueue, downloadQueueFilter],
   );
+  const pendingSyncItems = useMemo(() => {
+    const items = syncPlan?.items.filter((item) => item.status !== "valid") ?? [];
+    if (syncPendingFilter === "missing") {
+      return items.filter((item) => item.status === "missing");
+    }
+    if (syncPendingFilter === "outdated") {
+      return items.filter((item) => item.status !== "missing");
+    }
+    return items;
+  }, [syncPendingFilter, syncPlan]);
 
   function togglePath(path: string) {
     setSelectedPaths((current) => {
@@ -565,44 +578,79 @@ function App() {
 
       <div className="sync-lists">
         <section aria-label="待同步文件">
-          <h3>待同步文件</h3>
+          <div className="sync-list-head">
+            <h3>待同步文件</h3>
+            <select
+              aria-label="同步筛选"
+              value={syncPendingFilter}
+              onChange={(event) => setSyncPendingFilter(event.currentTarget.value as SyncPendingFilter)}
+            >
+              <option value="all">全部待同步</option>
+              <option value="missing">缺失</option>
+              <option value="outdated">过期</option>
+            </select>
+          </div>
           {!syncPlan && <p className="empty-state">点击“扫描同步”后会列出缺失或校验不一致的文件。</p>}
           {syncPlan && syncPlan.downloadPaths.length === 0 && (
             <p className="empty-state">当前同步目录中没有需要下载的文件。</p>
           )}
-          {syncPlan?.items
-            .filter((item) => item.status !== "valid")
-            .slice(0, 200)
-            .map((item) => (
-              <div className="sync-row" data-status={item.status} key={item.path}>
-                <span>
-                  {item.status === "missing"
-                    ? "缺失"
-                    : item.status === "sizeMismatch"
-                      ? "大小"
-                      : item.status === "sha256Mismatch"
-                        ? "校验"
-                        : "类型"}
-                </span>
-                <strong title={item.path}>{item.path}</strong>
-                <small>{formatBytes(item.size)}</small>
-                <small title={item.message}>{item.message}</small>
-              </div>
-            ))}
+          {syncPlan && pendingSyncItems.length === 0 && (
+            <p className="empty-state">当前筛选条件下没有待同步文件。</p>
+          )}
+          {pendingSyncItems.length > 0 && (
+            <VirtualList
+              ariaLabel="待同步文件列表"
+              className="sync-virtual-list"
+              height={360}
+              itemCount={pendingSyncItems.length}
+              rowHeight={52}
+              renderRow={(index) => {
+                const item = pendingSyncItems[index];
+                return (
+                  <div className="sync-row" data-status={item.status} key={item.path}>
+                    <span>
+                      {item.status === "missing"
+                        ? "缺失"
+                        : item.status === "sizeMismatch"
+                          ? "大小"
+                          : item.status === "sha256Mismatch"
+                            ? "校验"
+                            : "类型"}
+                    </span>
+                    <strong title={item.path}>{item.path}</strong>
+                    <small>{formatBytes(item.size)}</small>
+                    <small title={item.message}>{item.message}</small>
+                  </div>
+                );
+              }}
+            />
+          )}
         </section>
 
         <section aria-label="额外本地文件">
           <h3>额外本地文件</h3>
           {!syncPlan && <p className="empty-state">额外文件只会展示，不会自动删除。</p>}
           {syncPlan && syncPlan.extras.length === 0 && <p className="empty-state">未发现额外本地文件。</p>}
-          {syncPlan?.extras.slice(0, 200).map((extra) => (
-            <div className="sync-row extra" key={extra.path}>
-              <span>额外</span>
-              <strong title={extra.path}>{extra.path}</strong>
-              <small>{formatBytes(extra.size)}</small>
-              <small>not in manifest</small>
-            </div>
-          ))}
+          {syncPlan && syncPlan.extras.length > 0 && (
+            <VirtualList
+              ariaLabel="额外本地文件列表"
+              className="sync-virtual-list"
+              height={360}
+              itemCount={syncPlan.extras.length}
+              rowHeight={52}
+              renderRow={(index) => {
+                const extra = syncPlan.extras[index];
+                return (
+                  <div className="sync-row extra" key={extra.path}>
+                    <span>额外</span>
+                    <strong title={extra.path}>{extra.path}</strong>
+                    <small>{formatBytes(extra.size)}</small>
+                    <small>not in manifest</small>
+                  </div>
+                );
+              }}
+            />
+          )}
         </section>
       </div>
     </div>

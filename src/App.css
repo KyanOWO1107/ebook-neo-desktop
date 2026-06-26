@@ -764,6 +764,22 @@ button.folder-disclosure:hover {
   font-size: 0.9rem;
 }
 
+.sync-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sync-list-head select {
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
 .sync-row {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr) 88px minmax(0, 0.8fr);
@@ -796,6 +812,11 @@ button.folder-disclosure:hover {
 
 .sync-row small {
   color: var(--muted);
+}
+
+.sync-virtual-list {
+  flex: 1;
+  height: auto !important;
 }
 
 .download-task-list {

@@ -49,6 +49,32 @@ function makeRecord(index: number): ManifestRecord {
   };
 }
 
+function makeSyncPlan(count: number) {
+  return {
+    totalFiles: count,
+    totalBytes: count * 1024,
+    validFiles: 0,
+    validBytes: 0,
+    missingFiles: count,
+    missingBytes: count * 1024,
+    outdatedFiles: 0,
+    outdatedBytes: 0,
+    extraFiles: count,
+    extraBytes: count * 12,
+    downloadPaths: Array.from({ length: count }, (_, index) => `资料/同步/file-${index.toString().padStart(4, "0")}.pdf`),
+    items: Array.from({ length: count }, (_, index) => ({
+      path: `资料/同步/file-${index.toString().padStart(4, "0")}.pdf`,
+      status: "missing",
+      size: 1024,
+      message: "local file is missing",
+    })),
+    extras: Array.from({ length: count }, (_, index) => ({
+      path: `extra/local-${index.toString().padStart(4, "0")}.txt`,
+      size: 12,
+    })),
+  };
+}
+
 function mockedInvoke() {
   return invoke as Mock;
 }
@@ -597,5 +623,35 @@ describe("App", () => {
     expect(queue.getAttribute("data-total-items")).toBe("1000");
     expect(screen.queryByText("资料/性能测试/file-0999.pdf")).toBeNull();
     expect(screen.getAllByText(/排队|下载中|完成|失败|取消|空文件/).length).toBeLessThan(80);
+  });
+
+  it("virtualizes large sync scan results and filters pending sync rows", async () => {
+    mockedInvoke().mockImplementation((command: string) => {
+      if (command === "load_settings") {
+        return Promise.resolve(defaultAppSettings);
+      }
+      if (command === "load_manifest") {
+        return Promise.resolve(records);
+      }
+      if (command === "scan_sync_plan") {
+        return Promise.resolve(makeSyncPlan(800));
+      }
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "同步" }));
+    fireEvent.click(screen.getByRole("button", { name: "扫描同步" }));
+
+    const pending = await screen.findByLabelText("待同步文件列表");
+    const extras = await screen.findByLabelText("额外本地文件列表");
+    expect(pending.getAttribute("data-total-items")).toBe("800");
+    expect(extras.getAttribute("data-total-items")).toBe("800");
+    expect(screen.queryByText("资料/同步/file-0799.pdf")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("同步筛选"), { target: { value: "outdated" } });
+    expect(await screen.findByText("当前筛选条件下没有待同步文件。")).toBeTruthy();
   });
 });
