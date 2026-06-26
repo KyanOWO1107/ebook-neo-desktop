@@ -17,34 +17,34 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import {
   defaultAppSettings,
+  buildRecordIndex,
   buildFolderSummaries,
   buildDownloadRequestPayload,
   buildVisibleFolderSummaries,
   clampDownloadJobs,
   clampLargeFileStreams,
   clampLargeFileThresholdMiB,
+  filterDownloadQueue,
   filterRecords,
   formatBytes,
+  initializeDownloadQueue,
   mergeAppSettings,
   recordsForFolderSelection,
+  selectedRecordsFromIndex,
   summarizeRecords,
   themeAttribute,
+  updateDownloadQueueItem,
   type AppSettings,
+  type DownloadQueueFilter,
+  type DownloadQueueItem,
   type ManifestRecord,
 } from "./manifest";
+import { VirtualList } from "./VirtualList";
 
 type DownloadItemResult = {
   path: string | null;
   status: "downloaded" | "createdEmpty" | "failed" | "canceled";
   message: string;
-};
-
-type DownloadQueueItem = {
-  path: string;
-  status: "queued" | "downloading" | "downloaded" | "createdEmpty" | "failed" | "canceled";
-  message: string;
-  bytesWritten: number;
-  totalBytes: number;
 };
 
 type DownloadTask = {
@@ -113,6 +113,7 @@ function App() {
   const [downloadLog, setDownloadLog] = useState("等待选择...");
   const [downloadResults, setDownloadResults] = useState<DownloadItemResult[]>([]);
   const [downloadQueue, setDownloadQueue] = useState<DownloadQueueItem[]>([]);
+  const [downloadQueueFilter, setDownloadQueueFilter] = useState<DownloadQueueFilter>("all");
   const [syncPlan, setSyncPlan] = useState<SyncPlan | null>(null);
   const [lastDownloadTargetRoot, setLastDownloadTargetRoot] = useState(defaultAppSettings.downloadRoot);
   const [activeDownloadTaskId, setActiveDownloadTaskId] = useState<string | null>(null);
@@ -295,17 +296,22 @@ function App() {
   const folders = useMemo(() => buildFolderSummaries(records), [records]);
   const visibleFolders = useMemo(() => buildVisibleFolderSummaries(folders, expandedRoots), [expandedRoots, folders]);
   const summary = useMemo(() => summarizeRecords(records), [records]);
+  const recordIndex = useMemo(() => buildRecordIndex(records), [records]);
   const visibleRecords = useMemo(() => {
     const folderRecords = activeFolder
       ? records.filter((record) => record.path === activeFolder || record.path.startsWith(`${activeFolder}/`))
       : records;
-    return filterRecords(folderRecords, query).slice(0, 500);
+    return filterRecords(folderRecords, query);
   }, [activeFolder, query, records]);
   const selectedRecords = useMemo(
-    () => records.filter((record) => selectedPaths.has(record.path)),
-    [records, selectedPaths],
+    () => selectedRecordsFromIndex(recordIndex, selectedPaths),
+    [recordIndex, selectedPaths],
   );
   const selectedBytes = selectedRecords.reduce((total, record) => total + record.size, 0);
+  const filteredDownloadQueue = useMemo(
+    () => filterDownloadQueue(downloadQueue, downloadQueueFilter),
+    [downloadQueue, downloadQueueFilter],
+  );
 
   function togglePath(path: string) {
     setSelectedPaths((current) => {
@@ -372,17 +378,12 @@ function App() {
     if (event.path) {
       const status = downloadStatusFromProgress(event);
       setDownloadQueue((items) =>
-        items.map((item) =>
-          item.path === event.path
-            ? {
-                ...item,
-                status,
-                message: event.message,
-                bytesWritten: event.bytesWritten,
-                totalBytes: event.totalBytes,
-              }
-            : item,
-        ),
+        updateDownloadQueueItem(items, event.path as string, {
+          status,
+          message: event.message,
+          bytesWritten: event.bytesWritten,
+          totalBytes: event.totalBytes,
+        }),
       );
     }
     if (event.path && ["finished", "failed", "canceled"].includes(event.kind)) {
@@ -424,7 +425,10 @@ function App() {
   }
 
   function buildCommandPreview(paths: string[], targetRoot: string) {
-    const selected = records.filter((record) => paths.includes(record.path));
+    const selected = paths.flatMap((path) => {
+      const record = recordIndex.get(path);
+      return record ? [record] : [];
+    });
     if (selected.length === 1) {
       return `${downloadSettings.rclonePath} ${
         selected[0].size >= downloadSettings.largeFileThresholdMiB * 1024 * 1024 ? "copyto" : "cat"
@@ -449,18 +453,8 @@ function App() {
     setStatus(`正在下载 ${paths.length.toLocaleString()} 个文件...`);
     setDownloadLog(buildCommandPreview(paths, targetRoot));
     setDownloadResults([]);
-    setDownloadQueue(
-      paths.map((path) => {
-        const record = records.find((item) => item.path === path);
-        return {
-          path,
-          status: "queued",
-          message: `queued ${path}`,
-          bytesWritten: 0,
-          totalBytes: record?.size ?? 0,
-        };
-      }),
-    );
+    setDownloadQueueFilter("all");
+    setDownloadQueue(initializeDownloadQueue(paths, recordIndex));
     setDownloadProgress({
       taskId: "",
       kind: "queued",
@@ -919,7 +913,10 @@ function App() {
               <div className="panel-head">
                 <div>
                   <h2>{activeFolder ?? "全部资料"}</h2>
-                  <p>{status}</p>
+                  <p className="panel-meta">
+                    <span>{visibleRecords.length.toLocaleString()} 项匹配</span>
+                    <span>{status}</span>
+                  </p>
                 </div>
                 <div className="selection-actions">
                   <button type="button" onClick={selectVisible} disabled={visibleRecords.length === 0}>
@@ -934,27 +931,41 @@ function App() {
                 </div>
               </div>
 
-              <div className="resource-table" role="table" aria-label="资料列表">
+              <div className="resource-table" role="table" aria-label="资料列表区域">
                 <div className="resource-row header" role="row">
                   <span></span>
                   <span>路径</span>
                   <span>大小</span>
                   <span>更新</span>
                 </div>
-                {visibleRecords.map((record) => (
-                  <label className="resource-row" key={record.path} role="row">
-                    <input
-                      type="checkbox"
-                      checked={selectedPaths.has(record.path)}
-                      onChange={() => togglePath(record.path)}
-                    />
-                    <span className="path-cell" title={record.path}>
-                      {record.path}
-                    </span>
-                    <span>{formatBytes(record.size)}</span>
-                    <span>{record.updatedAt}</span>
-                  </label>
-                ))}
+                {visibleRecords.length === 0 ? (
+                  <p className="empty-state">没有匹配的资料。</p>
+                ) : (
+                  <VirtualList
+                    ariaLabel="资料列表"
+                    className="resource-virtual-list"
+                    height={480}
+                    itemCount={visibleRecords.length}
+                    rowHeight={40}
+                    renderRow={(index) => {
+                      const record = visibleRecords[index];
+                      return (
+                        <label className="resource-row" key={record.path} role="row">
+                          <input
+                            type="checkbox"
+                            checked={selectedPaths.has(record.path)}
+                            onChange={() => togglePath(record.path)}
+                          />
+                          <span className="path-cell" title={record.path}>
+                            {record.path}
+                          </span>
+                          <span>{formatBytes(record.size)}</span>
+                          <span>{record.updatedAt}</span>
+                        </label>
+                      );
+                    }}
+                  />
+                )}
               </div>
             </div>
           ) : activeView === "downloads" ? (
@@ -969,6 +980,16 @@ function App() {
                   </p>
                 </div>
                 <div className="selection-actions">
+                  <select
+                    aria-label="下载筛选"
+                    value={downloadQueueFilter}
+                    onChange={(event) => setDownloadQueueFilter(event.currentTarget.value as DownloadQueueFilter)}
+                  >
+                    <option value="all">全部</option>
+                    <option value="active">进行中</option>
+                    <option value="failed">失败</option>
+                    <option value="completed">完成</option>
+                  </select>
                   <button type="button" onClick={retryFailedDownloads} disabled={failedDownloadCount === 0 || isDownloading}>
                     重试失败
                   </button>
@@ -978,30 +999,47 @@ function App() {
                 </div>
               </div>
 
-              <div className="download-task-list" aria-label="下载任务列表">
+              <div className="download-task-list" aria-label="下载任务列表区域">
                 {downloadQueue.length === 0 && <p className="empty-state">开始下载后会在这里显示完整任务队列。</p>}
-                {downloadQueue.map((item) => (
-                  <div className="download-task-row" data-status={item.status} key={item.path}>
-                    <span className="task-status">
-                      {item.status === "failed"
-                        ? "失败"
-                        : item.status === "createdEmpty"
-                          ? "空文件"
-                          : item.status === "canceled"
-                            ? "取消"
-                            : item.status === "downloaded"
-                              ? "完成"
-                              : item.status === "downloading"
-                                ? "下载中"
-                                : "排队"}
-                    </span>
-                    <strong title={item.path}>{item.path}</strong>
-                    <small>
-                      {item.totalBytes > 0 ? `${formatBytes(item.bytesWritten)} / ${formatBytes(item.totalBytes)}` : "等待进度"}
-                    </small>
-                    <small title={item.message}>{item.message}</small>
-                  </div>
-                ))}
+                {downloadQueue.length > 0 && filteredDownloadQueue.length === 0 && (
+                  <p className="empty-state">当前筛选条件下没有下载项。</p>
+                )}
+                {filteredDownloadQueue.length > 0 && (
+                  <VirtualList
+                    ariaLabel="下载任务列表"
+                    className="download-virtual-list"
+                    height={500}
+                    itemCount={filteredDownloadQueue.length}
+                    rowHeight={56}
+                    renderRow={(index) => {
+                      const item = filteredDownloadQueue[index];
+                      return (
+                        <div className="download-task-row" data-status={item.status} key={item.path}>
+                          <span className="task-status">
+                            {item.status === "failed"
+                              ? "失败"
+                              : item.status === "createdEmpty"
+                                ? "空文件"
+                                : item.status === "canceled"
+                                  ? "取消"
+                                  : item.status === "downloaded"
+                                    ? "完成"
+                                    : item.status === "downloading"
+                                      ? "下载中"
+                                      : "排队"}
+                          </span>
+                          <strong title={item.path}>{item.path}</strong>
+                          <small>
+                            {item.totalBytes > 0
+                              ? `${formatBytes(item.bytesWritten)} / ${formatBytes(item.totalBytes)}`
+                              : "等待进度"}
+                          </small>
+                          <small title={item.message}>{item.message}</small>
+                        </div>
+                      );
+                    }}
+                  />
+                )}
               </div>
             </div>
           ) : activeView === "sync" ? (

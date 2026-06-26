@@ -412,6 +412,16 @@ button.folder-disclosure:hover {
   border-bottom: 1px solid var(--border-soft);
 }
 
+.panel-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.panel-meta span {
+  min-width: 0;
+}
+
 .selection-actions {
   display: flex;
   gap: 8px;
@@ -426,6 +436,15 @@ button.folder-disclosure:hover {
   cursor: pointer;
 }
 
+.selection-actions select {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
 .selection-actions button:disabled {
   cursor: default;
   opacity: 0.45;
@@ -436,7 +455,7 @@ button.folder-disclosure:hover {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .resource-row {
@@ -471,6 +490,11 @@ button.folder-disclosure:hover {
   width: 16px;
   height: 16px;
   accent-color: var(--primary);
+}
+
+.resource-virtual-list {
+  flex: 1;
+  height: auto !important;
 }
 
 .path-cell {
@@ -779,7 +803,7 @@ button.folder-disclosure:hover {
   min-height: 0;
   flex-direction: column;
   gap: 8px;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .download-task-row {
@@ -792,6 +816,11 @@ button.folder-disclosure:hover {
   border: 1px solid var(--border-soft);
   border-radius: 8px;
   background: var(--surface-soft);
+}
+
+.download-virtual-list {
+  flex: 1;
+  height: auto !important;
 }
 
 .download-task-row strong,

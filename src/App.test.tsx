@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import App from "./App";
 import { defaultAppSettings, type ManifestRecord } from "./manifest";
@@ -35,6 +35,19 @@ const records: ManifestRecord[] = [
     visibility: "private",
   },
 ];
+
+function makeRecord(index: number): ManifestRecord {
+  const suffix = index.toString().padStart(4, "0");
+  return {
+    path: `资料/性能测试/file-${suffix}.pdf`,
+    objectKey: `objects/sha256/${suffix}/file-${suffix}.pdf`,
+    sha256: suffix.padEnd(64, "a").slice(0, 64),
+    size: 1024 + index,
+    storage: "r2",
+    updatedAt: "2026-06-26",
+    visibility: "private",
+  };
+}
 
 function mockedInvoke() {
   return invoke as Mock;
@@ -407,8 +420,9 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "下载" }));
 
-    expect(await screen.findByText("失败")).toBeTruthy();
-    expect(await screen.findByText("missing object")).toBeTruthy();
+    const queue = await screen.findByLabelText("下载任务列表");
+    expect(await within(queue).findByText("失败")).toBeTruthy();
+    expect(await within(queue).findByText("missing object")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "重试失败" }));
 
@@ -537,5 +551,51 @@ describe("App", () => {
       (queue.textContent ?? "").indexOf("资料/数据结构/b.pdf"),
     );
     expect(queue.textContent).toContain("downloaded 资料/数据结构/b.pdf");
+  });
+
+  it("keeps large resource result sets scrollable instead of truncating them to 500 rows", async () => {
+    mockedInvoke().mockImplementation((command: string) => {
+      if (command === "load_settings") {
+        return Promise.resolve(defaultAppSettings);
+      }
+      if (command === "load_manifest") {
+        return Promise.resolve(Array.from({ length: 650 }, (_, index) => makeRecord(index)));
+      }
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/性能测试/file-0000.pdf")).toBeTruthy());
+    expect(await screen.findByText("650 项匹配")).toBeTruthy();
+    expect(screen.getByLabelText("资料列表").getAttribute("data-total-items")).toBe("650");
+  });
+
+  it("virtualizes very large download queues on the downloads view", async () => {
+    const manyRecords = Array.from({ length: 1000 }, (_, index) => makeRecord(index));
+    mockedInvoke().mockImplementation((command: string) => {
+      if (command === "load_settings") {
+        return Promise.resolve(defaultAppSettings);
+      }
+      if (command === "load_manifest") {
+        return Promise.resolve(manyRecords);
+      }
+      if (command === "start_download") {
+        return Promise.resolve({ taskId: "download-1" });
+      }
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("资料/性能测试/file-0000.pdf")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "选中当前列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始下载" }));
+    fireEvent.click(screen.getByRole("button", { name: "下载" }));
+
+    const queue = await screen.findByLabelText("下载任务列表");
+    expect(queue.getAttribute("data-total-items")).toBe("1000");
+    expect(screen.queryByText("资料/性能测试/file-0999.pdf")).toBeNull();
+    expect(screen.getAllByText(/排队|下载中|完成|失败|取消|空文件/).length).toBeLessThan(80);
   });
 });

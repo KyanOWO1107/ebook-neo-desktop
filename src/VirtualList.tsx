@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 
 type VirtualListProps = {
   ariaLabel: string;
@@ -7,7 +8,7 @@ type VirtualListProps = {
   height: number;
   overscan?: number;
   className?: string;
-  renderRow: (index: number) => React.ReactNode;
+  renderRow: (index: number) => ReactNode;
 };
 
 export function VirtualList({
