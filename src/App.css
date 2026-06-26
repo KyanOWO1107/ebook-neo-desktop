@@ -743,6 +743,7 @@ button.folder-disclosure:hover {
 .sync-lists {
   display: grid;
   min-height: 0;
+  flex: 1;
   grid-template-columns: minmax(0, 1fr) minmax(0, 0.74fr);
   gap: 12px;
   overflow: hidden;
@@ -822,6 +823,7 @@ button.folder-disclosure:hover {
 .download-task-list {
   display: flex;
   min-height: 0;
+  flex: 1;
   flex-direction: column;
   gap: 8px;
   overflow: hidden;
