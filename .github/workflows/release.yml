@@ -96,11 +96,29 @@ jobs:
           tagName: ${{ github.event_name == 'workflow_dispatch' && format('ebook-neo-desktop-v{0}', inputs.version) || github.ref_name }}
           releaseName: "Ebook Neo Desktop ${{ steps.release_version.outputs.version }}"
           releaseBody: |
-            Windows and Linux desktop builds for Ebook Neo.
+            ## Changelog
+
+            ### Added
+            - Collaborator read-only sync view for comparing the local sync folder with the latest manifest.
+            - Separate saved sync folder setting.
+            - Scoped sync: sync all resources or only the current folder selected in the sidebar.
+            - Open sync folder action.
+            - Virtualized resource, download, and sync lists for large collections.
+            - Download and sync list filters for dense task/result views.
+
+            ### Changed
+            - Batched high-frequency download progress row updates to reduce UI stalls.
+            - Improved dense list layouts so long queues remain scrollable.
+            - Kept the sidebar logo/title and `全部资料` row fixed while only the folder index scrolls.
+
+            ### Fixed
+            - Dark mode now applies to the document root background.
+            - Long expanded sidebar indexes no longer stretch the app layout or affect the right-side workspace.
 
             Notes:
             - macOS builds are intentionally not included in this workflow.
             - rclone and the read-only R2 remote are still external collaborator prerequisites.
             - These builds are unsigned; Windows users may see a SmartScreen warning.
+            - Sync downloads missing or outdated files only; it does not upload, delete, or move local extra files.
           releaseDraft: true
           prerelease: false
