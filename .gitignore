@@ -16,7 +16,6 @@ tmp/
 
 # Editor directories and files
 .vscode/*
-!.vscode/extensions.json
 .idea
 .DS_Store
 *.suo
@@ -24,3 +23,7 @@ tmp/
 *.njsproj
 *.sln
 *.sw?
+
+.agent/*
+
+.docs/superpowers/*
