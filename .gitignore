@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 .agent/
+docs/superpowers/
 tmp/
 
 # Editor directories and files
@@ -23,7 +24,3 @@ tmp/
 *.njsproj
 *.sln
 *.sw?
-
-.agent/*
-
-.docs/superpowers/*
