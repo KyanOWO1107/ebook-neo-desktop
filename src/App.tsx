@@ -125,6 +125,8 @@ function App() {
   const [activeView, setActiveView] = useState<"resources" | "downloads" | "sync" | "settings">("resources");
   const activeDownloadTaskIdRef = useRef<string | null>(null);
   const isAwaitingDownloadTaskRef = useRef(false);
+  const pendingQueueEventsRef = useRef<Map<string, DownloadProgressEvent>>(new Map());
+  const queueFlushFrameRef = useRef<number | null>(null);
 
   async function loadManifest(indexRepoPath = downloadSettings.indexRepoPath) {
     setIsLoading(true);
@@ -293,6 +295,10 @@ function App() {
     return () => {
       disposed = true;
       unlisten?.();
+      if (queueFlushFrameRef.current !== null) {
+        window.cancelAnimationFrame(queueFlushFrameRef.current);
+        queueFlushFrameRef.current = null;
+      }
     };
   }, []);
 
@@ -389,15 +395,7 @@ function App() {
     setDownloadProgress(event);
     setDownloadLog(event.message);
     if (event.path) {
-      const status = downloadStatusFromProgress(event);
-      setDownloadQueue((items) =>
-        updateDownloadQueueItem(items, event.path as string, {
-          status,
-          message: event.message,
-          bytesWritten: event.bytesWritten,
-          totalBytes: event.totalBytes,
-        }),
-      );
+      enqueueQueueProgress(event);
     }
     if (event.path && ["finished", "failed", "canceled"].includes(event.kind)) {
       const status = downloadStatusFromProgress(event);
@@ -422,6 +420,32 @@ function App() {
           : `下载完成：${event.completedFiles.toLocaleString()} 个文件`,
       );
     }
+  }
+
+  function enqueueQueueProgress(event: DownloadProgressEvent) {
+    if (!event.path) {
+      return;
+    }
+    pendingQueueEventsRef.current.set(event.path, event);
+    if (queueFlushFrameRef.current !== null) {
+      return;
+    }
+    queueFlushFrameRef.current = window.requestAnimationFrame(() => {
+      queueFlushFrameRef.current = null;
+      const pending = Array.from(pendingQueueEventsRef.current.values());
+      pendingQueueEventsRef.current.clear();
+      setDownloadQueue((items) =>
+        pending.reduce((nextItems, progressEvent) => {
+          const status = downloadStatusFromProgress(progressEvent);
+          return updateDownloadQueueItem(nextItems, progressEvent.path as string, {
+            status,
+            message: progressEvent.message,
+            bytesWritten: progressEvent.bytesWritten,
+            totalBytes: progressEvent.totalBytes,
+          });
+        }, items),
+      );
+    });
   }
 
   function downloadStatusFromProgress(event: DownloadProgressEvent): DownloadQueueItem["status"] {

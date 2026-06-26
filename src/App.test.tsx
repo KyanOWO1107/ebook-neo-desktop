@@ -654,4 +654,59 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("同步筛选"), { target: { value: "outdated" } });
     expect(await screen.findByText("当前筛选条件下没有待同步文件。")).toBeTruthy();
   });
+
+  it("coalesces burst progress updates and keeps the latest row state", async () => {
+    const originalRequestAnimationFrame = window.requestAnimationFrame;
+    const originalCancelAnimationFrame = window.cancelAnimationFrame;
+    const callbacks: FrameRequestCallback[] = [];
+    window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      callbacks.push(callback);
+      return callbacks.length;
+    }) as typeof window.requestAnimationFrame;
+    window.cancelAnimationFrame = vi.fn() as typeof window.cancelAnimationFrame;
+
+    try {
+      render(<App />);
+
+      await waitFor(() => expect(screen.getByText("资料/数据结构/a.pdf")).toBeTruthy());
+
+      fireEvent.click(screen.getByRole("checkbox", { name: /资料\/数据结构\/a\.pdf/ }));
+      fireEvent.click(screen.getByRole("button", { name: "开始下载" }));
+      fireEvent.click(screen.getByRole("button", { name: "下载" }));
+
+      const queue = await screen.findByLabelText("下载任务列表");
+      emitDownloadProgress({
+        taskId: "download-1",
+        kind: "progress",
+        path: "资料/数据结构/a.pdf",
+        bytesWritten: 128,
+        totalBytes: 1024,
+        completedFiles: 0,
+        failedFiles: 0,
+        totalFiles: 1,
+        message: "first chunk",
+      });
+      emitDownloadProgress({
+        taskId: "download-1",
+        kind: "progress",
+        path: "资料/数据结构/a.pdf",
+        bytesWritten: 768,
+        totalBytes: 1024,
+        completedFiles: 0,
+        failedFiles: 0,
+        totalFiles: 1,
+        message: "latest chunk",
+      });
+
+      expect(callbacks).toHaveLength(1);
+      expect(within(queue).queryByText("768 B / 1.000 KiB")).toBeNull();
+      callbacks.splice(0).forEach((callback) => callback(16));
+
+      expect(await within(queue).findByText("768 B / 1.000 KiB")).toBeTruthy();
+      expect(await within(queue).findByText("latest chunk")).toBeTruthy();
+    } finally {
+      window.requestAnimationFrame = originalRequestAnimationFrame;
+      window.cancelAnimationFrame = originalCancelAnimationFrame;
+    }
+  });
 });
